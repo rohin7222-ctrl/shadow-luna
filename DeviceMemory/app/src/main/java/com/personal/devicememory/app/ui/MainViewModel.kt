@@ -11,6 +11,7 @@ import com.personal.devicememory.core.common.model.SourceType
 import com.personal.devicememory.core.database.DeviceMemoryDatabase
 import com.personal.devicememory.core.database.entity.CollectorConfigEntity
 import com.personal.devicememory.pipeline.WorkScheduler
+import com.personal.devicememory.pipeline.brain.LunaMemorySimulator
 import com.personal.devicememory.pipeline.brain.OnDeviceLunaBrain
 import com.personal.devicememory.pipeline.sync.LunaServerConfig
 import com.personal.devicememory.pipeline.sync.LunaSyncManager
@@ -86,11 +87,14 @@ data class MainUiState(
     val updateCheckError: String? = null,
     val handshake: HandshakeUiState = HandshakeUiState(),
     val showDeleteConfirmation: Boolean = false,
+    val simulationRunning: Boolean = false,
+    val simulationPasses: Int = 0,
+    val consolidatedLinks: Int = 0,
+    val topSimulatedTopics: List<String> = emptyList(),
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
-    private val db = DeviceMemoryDatabase.getInstance(application)
     private var handshakeJob: Job? = null
 
     private val _uiState = MutableStateFlow(
@@ -104,6 +108,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         loadState()
+        viewModelScope.launch {
+            LunaMemorySimulator.snapshot.collect { snap ->
+                _uiState.update {
+                    it.copy(
+                        simulationRunning = snap.isSimulating,
+                        simulationPasses = snap.totalPasses,
+                        consolidatedLinks = snap.associationsCount,
+                        topSimulatedTopics = snap.topSimulatedConcepts
+                    )
+                }
+            }
+        }
     }
 
     fun navigateTo(screen: ActiveScreen) {
@@ -145,6 +161,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 it.copy(
                     totalRecords = reply.totalMemories,
                     totalTokens = reply.totalTokens,
+                    simulationPasses = reply.simulationPasses,
+                    consolidatedLinks = reply.associationsCount,
                     messages = it.messages + OfflineChatMessage(
                         id = System.currentTimeMillis() + 1,
                         isUser = false,
@@ -343,6 +361,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun loadState() {
         val app = getApplication<Application>()
+        val db = DeviceMemoryDatabase.getInstance(app)
         viewModelScope.launch {
             try {
                 val sources = SourceType.entries.map { st ->
@@ -392,6 +411,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun toggleSource(sourceType: SourceType, enabled: Boolean) {
+        val db = DeviceMemoryDatabase.getInstance(getApplication())
         viewModelScope.launch {
             try {
                 db.collectorConfigDao().setEnabled(sourceType.name, if (enabled) 1 else 0)
@@ -431,6 +451,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val app = getApplication<Application>()
         viewModelScope.launch {
             try {
+                LunaMemorySimulator.stopSimulationLoop()
                 DeviceMemoryDatabase.destroyAll(app)
                 val newDb = DeviceMemoryDatabase.getInstance(app)
                 val defaults = SourceType.entries.map { st ->
@@ -443,9 +464,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         totalRecords = 0,
                         totalTokens = 0,
                         unsyncedRecords = 0,
+                        simulationPasses = 0,
+                        consolidatedLinks = 0,
+                        topSimulatedTopics = emptyList(),
                         statusMessage = "Phone vault & offline AI wiped to 0"
                     )
                 }
+                LunaMemorySimulator.startSimulationLoop(app)
                 loadState()
             } catch (e: Throwable) {
                 Log.e(TAG, "Error deleting all data", e)

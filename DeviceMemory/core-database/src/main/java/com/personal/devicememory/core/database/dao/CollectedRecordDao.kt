@@ -40,6 +40,9 @@ interface CollectedRecordDao {
     @Query("SELECT * FROM collected_records ORDER BY timestamp DESC LIMIT :limit")
     suspend fun getRecentAll(limit: Int = 15): List<CollectedRecordEntity>
 
+    @Query("SELECT * FROM collected_records ORDER BY timestamp ASC LIMIT :limit OFFSET :offset")
+    suspend fun getRecordsWindow(limit: Int, offset: Int): List<CollectedRecordEntity>
+
     @Query("SELECT * FROM collected_records WHERE source_type = :sourceType ORDER BY timestamp DESC LIMIT :limit")
     suspend fun getLatest(sourceType: String, limit: Int = 20): List<CollectedRecordEntity>
 

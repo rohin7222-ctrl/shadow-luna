@@ -18,10 +18,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModelProvider
+import com.personal.devicememory.app.service.ShadowTabWatcherService
 import com.personal.devicememory.app.ui.MainScreen
 import com.personal.devicememory.app.ui.MainViewModel
 import com.personal.devicememory.app.update.ShadowUpdateService
 import com.personal.devicememory.app.update.ShadowUpdateState
+import com.personal.devicememory.pipeline.brain.LunaMemorySimulator
 
 private val ShadowDarkColors = darkColorScheme(
     primary = Color(0xFF7C3AED),
@@ -109,6 +111,20 @@ class MainActivity : ComponentActivity() {
             val justUpdated = intent.getBooleanExtra(ShadowUpdateService.EXTRA_JUST_UPDATED, false)
             viewModel.onAppForegrounded(justUpdated)
         }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        try {
+            startService(Intent(this, ShadowTabWatcherService::class.java))
+        } catch (_: Throwable) {}
+        LunaMemorySimulator.setForegroundActive(true)
+        LunaMemorySimulator.startSimulationLoop(applicationContext)
+    }
+
+    override fun onStop() {
+        LunaMemorySimulator.setForegroundActive(false)
+        super.onStop()
     }
 
     override fun onResume() {

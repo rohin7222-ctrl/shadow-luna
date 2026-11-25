@@ -216,9 +216,13 @@ fun MainScreen(
                                             }
                                         }
                                         Text(
-                                            "Luna • Offline",
+                                            text = if (uiState.totalRecords > 0 && uiState.simulationPasses > 0) {
+                                                "Luna • Simulating #${uiState.simulationPasses} • ${uiState.consolidatedLinks} links"
+                                            } else {
+                                                "Luna • Offline"
+                                            },
                                             style = MaterialTheme.typography.labelSmall,
-                                            color = TextMuted
+                                            color = if (uiState.simulationRunning && uiState.totalRecords > 0) CyanAccent else TextMuted
                                         )
                                     }
                                 }
@@ -449,6 +453,9 @@ fun MainScreen(
                     OfflineChatScreen(
                         messages = uiState.messages,
                         totalRecords = uiState.totalRecords,
+                        simulationPasses = uiState.simulationPasses,
+                        consolidatedLinks = uiState.consolidatedLinks,
+                        topTopics = uiState.topSimulatedTopics,
                         onSendMessage = onSendOfflineMessage
                     )
                 }
@@ -524,6 +531,9 @@ fun MainScreen(
 private fun OfflineChatScreen(
     messages: List<OfflineChatMessage>,
     totalRecords: Int,
+    simulationPasses: Int,
+    consolidatedLinks: Int,
+    topTopics: List<String>,
     onSendMessage: (String) -> Unit
 ) {
     var inputText by remember { mutableStateOf("") }
@@ -602,12 +612,26 @@ private fun OfflineChatScreen(
                         if (totalRecords == 0) {
                             "Blank-slate on-device AI. Ask anything below to verify she speaks only from what she learns."
                         } else {
-                            "$totalRecords memories indexed offline. Test what Luna remembers below."
+                            "Continuously simulating $totalRecords memories (${simulationPasses} passes • $consolidatedLinks graph links). Ask about your real patterns below."
                         },
                         style = MaterialTheme.typography.bodySmall,
                         color = TextMuted,
                         textAlign = TextAlign.Center
                     )
+                    if (topTopics.isNotEmpty()) {
+                        Surface(
+                            shape = RoundedCornerShape(999.dp),
+                            color = GlassSurface,
+                            border = BorderStroke(0.7.dp, HairlineBorder)
+                        ) {
+                            Text(
+                                text = "Simulated topics: ${topTopics.take(4).joinToString(" • ")}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = CyanAccent,
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp)
+                            )
+                        }
+                    }
                 }
             } else {
                 LazyColumn(
@@ -660,7 +684,7 @@ private fun OfflineChatScreen(
                                             color = (if (msg.learned) CyanAccent else TextMuted).copy(alpha = 0.14f)
                                         ) {
                                             Text(
-                                                text = if (msg.learned) "Memory Recall" else "Untrained",
+                                                text = if (msg.learned) "AI Synthesis" else "Untrained",
                                                 style = MaterialTheme.typography.labelSmall,
                                                 color = if (msg.learned) CyanAccent else TextMuted,
                                                 fontWeight = FontWeight.SemiBold,

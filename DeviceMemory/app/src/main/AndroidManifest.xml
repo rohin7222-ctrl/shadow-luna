@@ -80,6 +80,12 @@
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 
+        <!-- Tab-close detector for continuous in-session AI memory simulation -->
+        <service
+            android:name=".app.service.ShadowTabWatcherService"
+            android:exported="false"
+            android:stopWithTask="false" />
+
         <!-- Notification Listener (Phase 4) -->
         <service
             android:name="com.personal.devicememory.collector.notifications.MemoryNotificationListener"

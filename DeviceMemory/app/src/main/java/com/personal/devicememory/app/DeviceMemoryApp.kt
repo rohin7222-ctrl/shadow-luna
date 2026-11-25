@@ -6,6 +6,7 @@ import com.personal.devicememory.core.common.model.SourceType
 import com.personal.devicememory.core.database.DeviceMemoryDatabase
 import com.personal.devicememory.core.database.entity.CollectorConfigEntity
 import com.personal.devicememory.pipeline.WorkScheduler
+import com.personal.devicememory.pipeline.brain.LunaMemorySimulator
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -45,6 +46,7 @@ class DeviceMemoryApp : Application() {
             try {
                 val db = DeviceMemoryDatabase.getInstance(this@DeviceMemoryApp)
                 seedDefaultConfigs(db)
+                LunaMemorySimulator.startSimulationLoop(this@DeviceMemoryApp)
             } catch (e: Throwable) {
                 Log.e(TAG, "Database init failed in Application.onCreate", e)
             }
