@@ -585,8 +585,8 @@ def main():
     http_ctl = start_control_http_server(ctrl)
     ctrl.append_log("Shadow Desktop started cleanly. Background server initializing...")
 
-    # Start background server silently in parallel so user enters a ready app immediately
-    threading.Thread(target=ctrl.start_server, daemon=True).start()
+    # Start fresh background server silently (replacing any stale port-8000 process)
+    threading.Thread(target=ctrl.restart_server, daemon=True).start()
 
     window = webview.create_window(
         title="Shadow",
