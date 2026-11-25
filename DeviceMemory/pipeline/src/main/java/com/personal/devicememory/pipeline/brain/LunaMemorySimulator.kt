@@ -31,6 +31,9 @@ data class SimulationSnapshot(
     val selfPlayAccuracyPct: Int = 0,
     val avgSurprise: Double = 0.0,
     val topPolicyStrategy: String = "",
+    val jepaAccuracyPct: Int = 0,
+    val avgFreeEnergy: Double = 0.0,
+    val curiosityTarget: String = "",
     val topSimulatedConcepts: List<String> = emptyList()
 )
 
@@ -100,6 +103,7 @@ object LunaMemorySimulator {
         val brainDao = db.brainSimulationDao()
         val stats = brainDao.getStats()
         val policy = brainDao.getPolicyState()
+        val world = brainDao.getWorldModelState()
         val top = brainDao.getTopInsights(5).map { it.concept }
         val acc = if (policy != null && policy.selfPlayTotal > 0) {
             ((policy.selfPlayCorrect.toDouble() / policy.selfPlayTotal) * 100.0).toInt().coerceIn(0, 100)
@@ -114,6 +118,9 @@ object LunaMemorySimulator {
             selfPlayAccuracyPct = acc,
             avgSurprise = policy?.avgSurprise ?: 0.0,
             topPolicyStrategy = policy?.let { formatTopPolicy(it) } ?: "",
+            jepaAccuracyPct = world?.jepaAccuracyPct ?: 0,
+            avgFreeEnergy = world?.avgFreeEnergy ?: 0.0,
+            curiosityTarget = world?.curiosityTarget ?: "",
             topSimulatedConcepts = top
         )
         _snapshot.value = snap
@@ -201,7 +208,15 @@ object LunaMemorySimulator {
         val windows = ((totalRecords + PASS_BATCH_SIZE - 1) / PASS_BATCH_SIZE).coerceAtLeast(1)
         val windowIdx = (nextPass - 1) % windows
         val offset = windowIdx * PASS_BATCH_SIZE
-        val batch = recordDao.getRecordsWindow(PASS_BATCH_SIZE, offset)
+        val windowBatch = recordDao.getRecordsWindow(PASS_BATCH_SIZE, offset)
+
+        // Active Inference epistemic curiosity replay on alternating passes
+        val prevWorld = brainDao.getWorldModelState()
+        val curiosityTerm = prevWorld?.curiosityTarget?.takeIf { it.isNotBlank() }
+        val curiosityBatch = if (curiosityTerm != null && nextPass % 2 == 0) {
+            recordDao.searchByText(curiosityTerm, limit = 30)
+        } else emptyList()
+        val batch = (windowBatch + curiosityBatch).distinctBy { it.id }
 
         if (batch.isEmpty()) {
             return refreshSnapshotFromDb(context)
@@ -348,6 +363,26 @@ object LunaMemorySimulator {
             passIndex = nextPass
         )
 
+        // Build chronological timeline transitions (z_t -> z_{t+1}) for JEPA World Model + Liquid Time + Poincaré
+        val transitions = ArrayList<Triple<String, String, Long>>()
+        for (i in 0 until prepared.size - 1) {
+            val (recA, cA, _) = prepared[i]
+            val (recB, cB, _) = prepared[i + 1]
+            val headA = cA.firstOrNull() ?: continue
+            val headB = cB.firstOrNull() ?: continue
+            if (headA != headB && abs(recB.timestamp - recA.timestamp) <= TEMPORAL_WINDOW_MS) {
+                transitions.add(Triple(headA, headB, recB.timestamp))
+            }
+        }
+        val conceptHitMap = conceptAccums.mapValues { it.value.hits }
+        val futureMetrics = FutureNeuralArchitectures.trainFuturePass(
+            brainDao = brainDao,
+            pairs = pairSignals,
+            timelineTransitions = transitions,
+            conceptHits = conceptHitMap,
+            passIndex = nextPass
+        )
+
         val totalLinks = brainDao.countAssociations()
         val totalInsights = brainDao.countInsights()
         val totalVecs = brainDao.countVectors()
@@ -374,6 +409,9 @@ object LunaMemorySimulator {
             selfPlayAccuracyPct = trainMetrics.selfPlayAccuracyPct,
             avgSurprise = trainMetrics.avgSurprise,
             topPolicyStrategy = formatTopPolicy(trainMetrics.policyState),
+            jepaAccuracyPct = futureMetrics.jepaAccuracyPct,
+            avgFreeEnergy = futureMetrics.avgFreeEnergy,
+            curiosityTarget = futureMetrics.curiosityTarget,
             topSimulatedConcepts = topConceptsDisplay
         )
     }

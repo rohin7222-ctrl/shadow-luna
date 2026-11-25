@@ -217,7 +217,7 @@ fun MainScreen(
                                         }
                                         Text(
                                             text = if (uiState.totalRecords > 0 && uiState.simulationPasses > 0) {
-                                                "Pass #${uiState.simulationPasses} • ${uiState.neuralVectorsCount} vecs • GRPO ${uiState.selfPlayAccuracyPct}%"
+                                                "Pass #${uiState.simulationPasses} • ${uiState.neuralVectorsCount} vecs • JEPA ${uiState.jepaAccuracyPct}% • GRPO ${uiState.selfPlayAccuracyPct}%"
                                             } else {
                                                 "Luna • Offline"
                                             },
@@ -457,6 +457,8 @@ fun MainScreen(
                         consolidatedLinks = uiState.consolidatedLinks,
                         neuralVectorsCount = uiState.neuralVectorsCount,
                         selfPlayAccuracyPct = uiState.selfPlayAccuracyPct,
+                        jepaAccuracyPct = uiState.jepaAccuracyPct,
+                        curiosityTarget = uiState.curiosityTarget,
                         topPolicyStrategy = uiState.topPolicyStrategy,
                         topTopics = uiState.topSimulatedTopics,
                         onSendMessage = onSendOfflineMessage
@@ -538,6 +540,8 @@ private fun OfflineChatScreen(
     consolidatedLinks: Int,
     neuralVectorsCount: Int,
     selfPlayAccuracyPct: Int,
+    jepaAccuracyPct: Int,
+    curiosityTarget: String,
     topPolicyStrategy: String,
     topTopics: List<String>,
     onSendMessage: (String) -> Unit
@@ -619,7 +623,8 @@ private fun OfflineChatScreen(
                             "Blank-slate on-device AI. Ask anything below to verify she speaks only from what she learns."
                         } else {
                             val policyNote = if (topPolicyStrategy.isNotBlank()) " • Policy: $topPolicyStrategy" else ""
-                            "Titans + TTT + GRPO Self-Play active over $totalRecords memories ($neuralVectorsCount neural vecs • $consolidatedLinks links • ${selfPlayAccuracyPct}% acc$policyNote)."
+                            val curiosityNote = if (curiosityTarget.isNotBlank()) " • Curiosity: \"$curiosityTarget\"" else ""
+                            "Titans + TTT + GRPO + JEPA + Poincaré active over $totalRecords memories ($neuralVectorsCount vecs • JEPA $jepaAccuracyPct% • GRPO $selfPlayAccuracyPct%$policyNote$curiosityNote)."
                         },
                         style = MaterialTheme.typography.bodySmall,
                         color = TextMuted,

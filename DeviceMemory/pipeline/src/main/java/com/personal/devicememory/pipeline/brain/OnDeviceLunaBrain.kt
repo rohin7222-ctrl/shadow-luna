@@ -22,6 +22,8 @@ data class OfflineLunaReply(
     val associationsCount: Int = 0,
     val neuralVectorsCount: Int = 0,
     val selfPlayAccuracyPct: Int = 0,
+    val jepaAccuracyPct: Int = 0,
+    val curiosityTarget: String = "",
     val response: String
 )
 
@@ -127,6 +129,10 @@ object OnDeviceLunaBrain {
         val simPasses = stats?.totalPasses ?: 0
         val policy = brainDao.getPolicyState() ?: NeuralPolicyStateEntity()
         val allVectors = brainDao.getAllVectors(900)
+        val worldState = brainDao.getWorldModelState()
+        val allFutureCells = brainDao.getAllFutureCells(600)
+        val jepaAcc = worldState?.jepaAccuracyPct ?: 0
+        val curiosity = worldState?.curiosityTarget ?: ""
         val selfPlayAccPct = if (policy.selfPlayTotal > 0) {
             ((policy.selfPlayCorrect.toDouble() / policy.selfPlayTotal.toDouble()) * 100.0).toInt().coerceIn(0, 100)
         } else 0
@@ -141,6 +147,8 @@ object OnDeviceLunaBrain {
                 associationsCount = assocCount,
                 neuralVectorsCount = allVectors.size,
                 selfPlayAccuracyPct = selfPlayAccPct,
+                jepaAccuracyPct = jepaAcc,
+                curiosityTarget = curiosity,
                 response = buildString {
                     appendLine("⭕ [Offline • Untrained • 0 Memories]")
                     appendLine("\"$query\" பற்றி எனக்கு எதுவும் தெரியாது — போனில் இன்னும் எதுவும் கற்கப்படவில்லை.")
@@ -154,10 +162,13 @@ object OnDeviceLunaBrain {
 
         if (intent == QueryIntent.SUMMARY_PROFILE && topInsights.isNotEmpty()) {
             val summaryBody = buildString {
-                appendLine("🧠 [Titans+GRPO Profile • Pass #$simPasses • ${allVectors.size} neural vecs • $selfPlayAccPct% Self-Play]")
+                appendLine("🧠 [Next-Gen Neural Profile • Pass #$simPasses • ${allVectors.size} vecs • GRPO $selfPlayAccPct% • JEPA $jepaAcc%]")
                 appendLine(
-                    "Learned Policy Weights — Exact ×${fmt(policy.weightExact)}, Graph ×${fmt(policy.weightGraph)}, Vector ×${fmt(policy.weightVector)}, Temporal ×${fmt(policy.weightTemporal)}"
+                    "GRPO Policy: Exact ×${fmt(policy.weightExact)}, Graph ×${fmt(policy.weightGraph)}, Vector ×${fmt(policy.weightVector)}, Temporal ×${fmt(policy.weightTemporal)}"
                 )
+                if (curiosity.isNotBlank()) {
+                    appendLine("Active Inference Focus: exploring \"$curiosity\" next")
+                }
                 appendLine()
                 for (ins in topInsights.take(6)) {
                     appendLine("• ${ins.concept.replaceFirstChar { it.uppercase() }} (${ins.category}): ${ins.summaryFact}")
@@ -172,6 +183,8 @@ object OnDeviceLunaBrain {
                 associationsCount = assocCount,
                 neuralVectorsCount = allVectors.size,
                 selfPlayAccuracyPct = selfPlayAccPct,
+                jepaAccuracyPct = jepaAcc,
+                curiosityTarget = curiosity,
                 response = summaryBody
             )
         }
@@ -235,6 +248,13 @@ object OnDeviceLunaBrain {
             allVectors = allVectors,
             topK = 5
         )
+        val anchorTerm = expandedTerms.firstOrNull()
+        val poincareHierarchy = if (anchorTerm != null) {
+            FutureNeuralArchitectures.queryPoincareHierarchy(anchorTerm, allFutureCells, topK = 4)
+        } else emptyList()
+        val jepaForecast = if (anchorTerm != null) {
+            FutureNeuralArchitectures.predictNextWorldStates(anchorTerm, allFutureCells, worldState, topK = 3)
+        } else emptyList()
 
         // Score candidate memories dynamically using GRPO learned policy weights!
         val scored = linkedMapOf<String, Pair<CollectedRecordEntity, Double>>()
@@ -304,9 +324,11 @@ object OnDeviceLunaBrain {
                 associationsCount = assocCount,
                 neuralVectorsCount = allVectors.size,
                 selfPlayAccuracyPct = selfPlayAccPct,
+                jepaAccuracyPct = jepaAcc,
+                curiosityTarget = curiosity,
                 response = buildString {
                     appendLine("⚠️ [Offline • Untrained for \"$query\"]")
-                    appendLine("Checked $totalMemories memories, $assocCount links & ${allVectors.size} neural vectors (Pass #$simPasses • $selfPlayAccPct% GRPO Self-Play) — \"$query\" never appeared in your data.")
+                    appendLine("Checked $totalMemories memories, $assocCount links & ${allVectors.size} vectors (Pass #$simPasses • GRPO $selfPlayAccPct% • JEPA $jepaAcc%) — \"$query\" never appeared in your data.")
                     if (realTopics.isNotBlank()) {
                         append("Trained concepts ready in vault: $realTopics")
                     }
@@ -319,13 +341,19 @@ object OnDeviceLunaBrain {
         } else ""
 
         val response = buildString {
-            appendLine("🧠 [Titans+TTT+GRPO • Pass #$simPasses • ${allVectors.size} vecs • ${selfPlayAccPct}% Self-Play$surpriseHint]")
+            appendLine("🧠 [Titans+TTT+GRPO+JEPA+Poincaré • Pass #$simPasses • ${allVectors.size} vecs • GRPO ${selfPlayAccPct}% • JEPA ${jepaAcc}%$surpriseHint]")
             if (fuzzyCorrected.isNotEmpty()) {
                 appendLine("Fuzzy Match: ${fuzzyCorrected.joinToString(", ")}")
             }
             if (matchedInsights.isNotEmpty()) {
                 val primary = matchedInsights.values.first()
                 appendLine("Habit (${primary.concept}): ${primary.summaryFact}")
+            }
+            if (jepaForecast.isNotEmpty()) {
+                appendLine("JEPA World Forecast (Often follows): ${jepaForecast.joinToString(" → ") { it.first }}")
+            }
+            if (poincareHierarchy.isNotEmpty()) {
+                appendLine("Poincaré Hierarchy Tree: ${poincareHierarchy.joinToString(", ") { "${it.first} (d=${fmt(it.second)})" }}")
             }
             if (tttSemanticNeighbors.isNotEmpty()) {
                 val vecText = tttSemanticNeighbors.take(4).joinToString(", ") { "${it.first} (${fmt(it.second)})" }
@@ -356,6 +384,8 @@ object OnDeviceLunaBrain {
             associationsCount = assocCount,
             neuralVectorsCount = allVectors.size,
             selfPlayAccuracyPct = selfPlayAccPct,
+            jepaAccuracyPct = jepaAcc,
+            curiosityTarget = curiosity,
             response = response
         )
     }

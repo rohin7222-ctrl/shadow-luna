@@ -16,12 +16,14 @@ import com.personal.devicememory.core.database.dao.SyncBookmarkDao
 import com.personal.devicememory.core.database.entity.BrainInsightEntity
 import com.personal.devicememory.core.database.entity.CollectedRecordEntity
 import com.personal.devicememory.core.database.entity.CollectorConfigEntity
+import com.personal.devicememory.core.database.entity.FutureMemoryCellEntity
 import com.personal.devicememory.core.database.entity.LearnedAssociationEntity
 import com.personal.devicememory.core.database.entity.LearnedTokenEntity
 import com.personal.devicememory.core.database.entity.NeuralPolicyStateEntity
 import com.personal.devicememory.core.database.entity.NeuralVectorEntity
 import com.personal.devicememory.core.database.entity.SimulationStatsEntity
 import com.personal.devicememory.core.database.entity.SyncBookmarkEntity
+import com.personal.devicememory.core.database.entity.WorldModelStateEntity
 import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
 
 @Database(
@@ -34,9 +36,11 @@ import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
         BrainInsightEntity::class,
         SimulationStatsEntity::class,
         NeuralVectorEntity::class,
-        NeuralPolicyStateEntity::class
+        NeuralPolicyStateEntity::class,
+        FutureMemoryCellEntity::class,
+        WorldModelStateEntity::class
     ],
-    version = 4,
+    version = 5,
     exportSchema = false
 )
 abstract class DeviceMemoryDatabase : RoomDatabase() {
@@ -153,6 +157,43 @@ abstract class DeviceMemoryDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `future_memory_cells` (
+                        `concept` TEXT NOT NULL,
+                        `poincare_csv` TEXT NOT NULL,
+                        `cms_mid_csv` TEXT NOT NULL,
+                        `liquid_state` REAL NOT NULL,
+                        `ff_goodness` REAL NOT NULL,
+                        `jepa_pred_error` REAL NOT NULL,
+                        `last_timestamp_ms` INTEGER NOT NULL,
+                        `updated_at` INTEGER NOT NULL,
+                        PRIMARY KEY(`concept`)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `world_model_state` (
+                        `id` INTEGER NOT NULL,
+                        `jepa_matrix_csv` TEXT NOT NULL,
+                        `ff_weights_csv` TEXT NOT NULL,
+                        `jepa_accuracy_pct` INTEGER NOT NULL,
+                        `jepa_correct` INTEGER NOT NULL,
+                        `jepa_total` INTEGER NOT NULL,
+                        `avg_free_energy` REAL NOT NULL,
+                        `avg_ff_goodness` REAL NOT NULL,
+                        `curiosity_target` TEXT NOT NULL,
+                        `updated_at` INTEGER NOT NULL,
+                        PRIMARY KEY(`id`)
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
+
         init {
             try {
                 System.loadLibrary("sqlcipher")
@@ -193,7 +234,7 @@ abstract class DeviceMemoryDatabase : RoomDatabase() {
                 DB_NAME
             )
                 .openHelperFactory(factory)
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
                 .fallbackToDestructiveMigration()
                 .build()
         }

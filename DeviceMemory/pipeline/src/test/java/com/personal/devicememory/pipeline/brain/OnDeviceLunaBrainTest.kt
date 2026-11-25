@@ -69,4 +69,27 @@ class OnDeviceLunaBrainTest {
         assertTrue(results.isNotEmpty())
         assertTrue(results.any { it.first == "gallery" || it.first == "youtube" })
     }
+
+    @Test
+    fun futurePoincareJepaForwardForwardAndLiquidMathWork() {
+        val p1 = FutureNeuralArchitectures.initPoincareCoords("whatsapp")
+        val p2 = FutureNeuralArchitectures.initPoincareCoords("camera")
+        assertTrue(FutureNeuralArchitectures.normSquared(p1) < 1.0)
+        assertEquals(0.0, FutureNeuralArchitectures.poincareDistance(p1, p1), 1e-4)
+        assertTrue(FutureNeuralArchitectures.poincareDistance(p1, p2) > 0.0)
+
+        val ffWeights = FloatArray(FutureNeuralArchitectures.FUTURE_DIM) { 0.7f }
+        val goodness = FutureNeuralArchitectures.forwardForwardGoodness(p1, p2, ffWeights)
+        assertTrue(goodness in 0.0..1.0)
+
+        val liqAfter1h = FutureNeuralArchitectures.liquidTimeUpdate(0.8, 0.2, 3_600_000L, goodness)
+        val liqAfter48h = FutureNeuralArchitectures.liquidTimeUpdate(0.8, 0.2, 48 * 3_600_000L, goodness)
+        assertTrue(liqAfter1h > liqAfter48h)
+
+        val idMatrix = FloatArray(FutureNeuralArchitectures.FUTURE_DIM * FutureNeuralArchitectures.FUTURE_DIM) { idx ->
+            if (idx / FutureNeuralArchitectures.FUTURE_DIM == idx % FutureNeuralArchitectures.FUTURE_DIM) 1.0f else 0.0f
+        }
+        val jepaOut = FutureNeuralArchitectures.jepaPredict(idMatrix, FutureNeuralArchitectures.l2Normalize(p1))
+        assertTrue(kotlin.math.abs(FutureNeuralArchitectures.normSquared(jepaOut) - 1.0) < 1e-3)
+    }
 }

@@ -5,10 +5,12 @@ import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import com.personal.devicememory.core.database.entity.BrainInsightEntity
+import com.personal.devicememory.core.database.entity.FutureMemoryCellEntity
 import com.personal.devicememory.core.database.entity.LearnedAssociationEntity
 import com.personal.devicememory.core.database.entity.NeuralPolicyStateEntity
 import com.personal.devicememory.core.database.entity.NeuralVectorEntity
 import com.personal.devicememory.core.database.entity.SimulationStatsEntity
+import com.personal.devicememory.core.database.entity.WorldModelStateEntity
 
 @Dao
 interface BrainSimulationDao {
@@ -115,4 +117,37 @@ interface BrainSimulationDao {
 
     @Query("DELETE FROM neural_policy_state")
     suspend fun clearPolicyState()
+
+    // ─── Future Next-Gen Architectures (Poincaré, CMS, Liquid, JEPA, Forward-Forward) ───
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertFutureCells(cells: List<FutureMemoryCellEntity>)
+
+    @Query("SELECT * FROM future_memory_cells WHERE concept IN (:concepts)")
+    suspend fun getFutureCellsByConcepts(concepts: List<String>): List<FutureMemoryCellEntity>
+
+    @Query("SELECT * FROM future_memory_cells ORDER BY liquid_state DESC, jepa_pred_error DESC LIMIT :limit")
+    suspend fun getAllFutureCells(limit: Int = 1200): List<FutureMemoryCellEntity>
+
+    @Query("SELECT COUNT(*) FROM future_memory_cells")
+    suspend fun countFutureCells(): Int
+
+    @Query("""
+        DELETE FROM future_memory_cells
+        WHERE concept NOT IN (
+            SELECT concept FROM future_memory_cells ORDER BY liquid_state DESC, updated_at DESC LIMIT :keepLimit
+        )
+    """)
+    suspend fun trimFutureCells(keepLimit: Int = 1200)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun saveWorldModelState(state: WorldModelStateEntity)
+
+    @Query("SELECT * FROM world_model_state WHERE id = 1 LIMIT 1")
+    suspend fun getWorldModelState(): WorldModelStateEntity?
+
+    @Query("DELETE FROM future_memory_cells")
+    suspend fun clearFutureCells()
+
+    @Query("DELETE FROM world_model_state")
+    suspend fun clearWorldModelState()
 }

@@ -93,6 +93,8 @@ data class MainUiState(
     val neuralVectorsCount: Int = 0,
     val selfPlayAccuracyPct: Int = 0,
     val topPolicyStrategy: String = "",
+    val jepaAccuracyPct: Int = 0,
+    val curiosityTarget: String = "",
     val topSimulatedTopics: List<String> = emptyList(),
 )
 
@@ -121,6 +123,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         neuralVectorsCount = snap.neuralVectorsCount,
                         selfPlayAccuracyPct = snap.selfPlayAccuracyPct,
                         topPolicyStrategy = snap.topPolicyStrategy,
+                        jepaAccuracyPct = snap.jepaAccuracyPct,
+                        curiosityTarget = snap.curiosityTarget,
                         topSimulatedTopics = snap.topSimulatedConcepts
                     )
                 }
@@ -175,6 +179,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     consolidatedLinks = reply.associationsCount,
                     neuralVectorsCount = reply.neuralVectorsCount,
                     selfPlayAccuracyPct = reply.selfPlayAccuracyPct,
+                    jepaAccuracyPct = reply.jepaAccuracyPct,
+                    curiosityTarget = reply.curiosityTarget,
                     messages = it.messages + OfflineChatMessage(
                         id = System.currentTimeMillis() + 1,
                         isUser = false,
@@ -481,6 +487,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         neuralVectorsCount = 0,
                         selfPlayAccuracyPct = 0,
                         topPolicyStrategy = "",
+                        jepaAccuracyPct = 0,
+                        curiosityTarget = "",
                         topSimulatedTopics = emptyList(),
                         statusMessage = "Phone vault & offline AI wiped to 0"
                     )
