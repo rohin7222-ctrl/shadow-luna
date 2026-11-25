@@ -1,0 +1,28 @@
+# Python & Desktop Server Runtime
+LunaServer/.venv/
+**/__pycache__/
+*.py[cod]
+LunaServer/luna_memory.db
+LunaServer/luna_memory.db-shm
+LunaServer/luna_memory.db-wal
+LunaServer/server.log
+LunaServer/runtime_state.json
+
+# Android / Gradle Build & Local Config
+DeviceMemory/.gradle/
+DeviceMemory/.idea/
+DeviceMemory/local.properties
+DeviceMemory/**/build/
+DeviceMemory/captures/
+DeviceMemory/**/*.iml
+DeviceMemory/.cxx/
+DeviceMemory/.externalNativeBuild/
+
+# Duplicate APK copies (root Shadow.apk is intentionally tracked)
+DeviceMemory/DeviceMemory-debug.apk
+LunaServer/Shadow.apk
+
+# IDE & OS
+.vscode/
+.DS_Store
+Thumbs.db

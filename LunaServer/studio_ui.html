@@ -1,0 +1,1170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="color-scheme" content="dark light">
+    <title>Shadow</title>
+    <style>
+        :root {
+            color-scheme: dark;
+            --bg-base: #06060b;
+            --bg-sidebar: #0a0a12;
+            --bg-surface: #10101c;
+            --bg-elevated: #171728;
+            --border: rgba(255, 255, 255, 0.08);
+            --border-glow: rgba(56, 189, 248, 0.38);
+            --primary: #7c3aed;
+            --primary-grad: linear-gradient(135deg, #38bdf8, #7c3aed);
+            --cyan: #38bdf8;
+            --success: #00e676;
+            --danger: #ff5252;
+            --text-main: #f4f4fc;
+            --text-muted: #8a8ba8;
+            --scrollbar-track: transparent;
+            --scrollbar-thumb: rgba(255, 255, 255, 0.14);
+            scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+        }
+
+        @supports not (scrollbar-color: auto) {
+            * { scrollbar-width: auto; }
+            ::-webkit-scrollbar { width: 6px; height: 6px; }
+            ::-webkit-scrollbar-track { background: transparent; }
+            ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.16); border-radius: 999px; }
+        }
+
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+        html, body {
+            height: 100%;
+            background: var(--bg-base);
+            color: var(--text-main);
+            font-family: 'Segoe UI Variable Display', 'Segoe UI', system-ui, 'Noto Sans Tamil', sans-serif;
+            line-height: 1.5;
+            overflow-wrap: break-word;
+            user-select: none;
+        }
+
+        h1, h2, h3 { text-wrap: balance; }
+        p, li { text-wrap: pretty; }
+
+        .app-shell {
+            display: grid;
+            grid-template-columns: 260px 1fr;
+            height: 100dvh;
+            width: 100%;
+        }
+
+        /* ─── Sidebar ─── */
+        .sidebar {
+            background: var(--bg-sidebar);
+            border-right: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            padding: 18px 14px;
+            gap: 18px;
+            min-inline-size: 0;
+        }
+
+        .brand-row {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 4px 6px;
+        }
+
+        .brand-logo {
+            width: 36px;
+            height: 36px;
+            border-radius: 10px;
+            object-fit: cover;
+            box-shadow: 0 0 18px rgba(157, 78, 221, 0.35);
+            display: block;
+        }
+
+        .brand-text {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .brand-title {
+            font-size: 1.15rem;
+            font-weight: 700;
+            letter-spacing: -0.02em;
+            color: var(--text-main);
+        }
+
+        .brand-sub {
+            font-size: 0.72rem;
+            color: var(--cyan);
+            letter-spacing: 0.04em;
+            font-weight: 600;
+        }
+
+        .nav-group {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .nav-btn {
+            display: flex;
+            align-items: center;
+            gap: 11px;
+            width: 100%;
+            padding: 11px 12px;
+            border-radius: 12px;
+            border: 1px solid transparent;
+            background: transparent;
+            color: var(--text-muted);
+            font-size: 0.92rem;
+            font-weight: 600;
+            cursor: pointer;
+            text-align: left;
+            transition: background 0.18s ease, color 0.18s ease, border-color 0.18s ease;
+        }
+
+        .nav-btn:hover {
+            background: rgba(255, 255, 255, 0.04);
+            color: var(--text-main);
+        }
+
+        .nav-btn.active {
+            background: rgba(157, 78, 221, 0.14);
+            border-color: rgba(157, 78, 221, 0.35);
+            color: #ffffff;
+        }
+
+        .nav-badge {
+            margin-inline-start: auto;
+            font-size: 0.72rem;
+            padding: 2px 8px;
+            border-radius: 999px;
+            background: rgba(0, 240, 255, 0.14);
+            color: var(--cyan);
+            font-weight: 700;
+        }
+
+        .sidebar-spacer { flex: 1; }
+
+        .connect-cta {
+            width: 100%;
+            padding: 12px 14px;
+            border-radius: 14px;
+            border: 1px solid rgba(0, 240, 255, 0.35);
+            background: linear-gradient(135deg, rgba(0, 240, 255, 0.12), rgba(157, 78, 221, 0.18));
+            color: #ffffff;
+            font-size: 0.92rem;
+            font-weight: 700;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            transition: transform 0.15s ease, box-shadow 0.2s ease, border-color 0.2s ease;
+        }
+
+        .connect-cta:hover {
+            box-shadow: 0 0 22px rgba(0, 240, 255, 0.22);
+            border-color: var(--cyan);
+        }
+
+        .connect-cta:active { transform: scale(0.98); }
+
+        .connect-cta.waiting-mobile {
+            border-color: var(--success);
+            background: linear-gradient(135deg, rgba(0, 230, 118, 0.2), rgba(0, 240, 255, 0.16));
+            animation: pulseGlow 1.6s infinite;
+        }
+
+        @keyframes pulseGlow {
+            0%, 100% { box-shadow: 0 0 8px rgba(0, 230, 118, 0.2); }
+            50% { box-shadow: 0 0 22px rgba(0, 230, 118, 0.45); }
+        }
+
+        /* Background Power Switch Footer */
+        .engine-footer {
+            background: var(--bg-surface);
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            padding: 10px 12px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+        }
+
+        .engine-status {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.82rem;
+            font-weight: 600;
+            color: var(--text-muted);
+        }
+
+        .dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #5c5e78;
+            transition: background 0.2s, box-shadow 0.2s;
+        }
+
+        .dot.on {
+            background: var(--success);
+            box-shadow: 0 0 10px var(--success);
+        }
+
+        .footer-actions {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .toggle-pill {
+            width: 42px;
+            height: 24px;
+            border-radius: 999px;
+            border: 1px solid var(--border);
+            background: #232338;
+            position: relative;
+            cursor: pointer;
+            transition: background 0.2s, border-color 0.2s;
+        }
+
+        .toggle-pill::after {
+            content: "";
+            position: absolute;
+            top: 2px;
+            left: 2px;
+            width: 18px;
+            height: 18px;
+            border-radius: 50%;
+            background: #b5b7d4;
+            transition: transform 0.2s ease, background 0.2s;
+        }
+
+        .toggle-pill.on {
+            background: rgba(0, 230, 118, 0.25);
+            border-color: rgba(0, 230, 118, 0.5);
+        }
+
+        .toggle-pill.on::after {
+            transform: translateX(18px);
+            background: var(--success);
+        }
+
+        .icon-btn {
+            width: 32px;
+            height: 32px;
+            border-radius: 10px;
+            border: 1px solid transparent;
+            background: transparent;
+            color: var(--text-muted);
+            cursor: pointer;
+            display: grid;
+            place-items: center;
+            font-size: 1rem;
+        }
+
+        .icon-btn:hover {
+            background: rgba(255, 255, 255, 0.06);
+            color: var(--text-main);
+        }
+
+        /* ─── Main Stage ─── */
+        .stage {
+            position: relative;
+            min-inline-size: 0;
+            min-block-size: 0;
+            background:
+                radial-gradient(ellipse 65% 45% at 50% 10%, rgba(157, 78, 221, 0.14), transparent 70%),
+                radial-gradient(ellipse 45% 35% at 85% 90%, rgba(0, 240, 255, 0.06), transparent 70%),
+                var(--bg-base);
+            display: flex;
+            flex-direction: column;
+        }
+
+        .view {
+            display: none;
+            flex: 1;
+            min-block-size: 0;
+            flex-direction: column;
+        }
+
+        .view.active {
+            display: flex;
+        }
+
+        /* ─── View 1: Ask Luna (Serene Consumer Chat) ─── */
+        .chat-scroll {
+            flex: 1;
+            min-block-size: 0;
+            overflow-y: auto;
+            scrollbar-gutter: stable;
+            overscroll-behavior: contain;
+            padding: 28px 24px 12px;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .chat-container {
+            width: 100%;
+            max-width: 760px;
+            margin: 0 auto;
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
+            flex: 1;
+        }
+
+        .empty-hero {
+            margin: auto;
+            text-align: center;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 14px;
+            padding: 32px 16px;
+        }
+
+        .hero-orb {
+            width: 78px;
+            height: 78px;
+            border-radius: 22px;
+            box-shadow: 0 0 42px rgba(0, 240, 255, 0.18), 0 0 80px rgba(157, 78, 221, 0.22);
+            display: block;
+        }
+
+        .empty-hero h1 {
+            font-size: 1.55rem;
+            font-weight: 700;
+            letter-spacing: -0.02em;
+            color: var(--text-main);
+        }
+
+        .empty-hero p {
+            font-size: 0.92rem;
+            color: var(--text-muted);
+            max-width: 360px;
+        }
+
+        .msg {
+            padding: 13px 18px;
+            border-radius: 18px;
+            font-size: 0.95rem;
+            max-width: 82%;
+            white-space: pre-wrap;
+            user-select: text;
+            animation: msgIn 0.2s ease-out;
+        }
+
+        @keyframes msgIn {
+            from { opacity: 0; transform: translateY(6px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .msg.user {
+            background: var(--primary-grad);
+            color: #fff;
+            align-self: flex-end;
+            border-bottom-right-radius: 4px;
+            box-shadow: 0 6px 20px rgba(157, 78, 221, 0.25);
+        }
+
+        .msg.luna {
+            background: var(--bg-surface);
+            border: 1px solid var(--border);
+            color: var(--text-main);
+            align-self: flex-start;
+            border-bottom-left-radius: 4px;
+        }
+
+        .msg.luna.learned {
+            border-color: rgba(0, 240, 255, 0.35);
+        }
+
+        .composer-wrap {
+            padding: 12px 24px 22px;
+        }
+
+        .composer {
+            max-width: 760px;
+            margin: 0 auto;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            background: rgba(17, 17, 29, 0.85);
+            backdrop-filter: blur(18px);
+            border: 1px solid var(--border);
+            border-radius: 28px;
+            padding: 6px 8px 6px 20px;
+            box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+            transition: border-color 0.2s;
+        }
+
+        .composer:focus-within {
+            border-color: rgba(0, 240, 255, 0.45);
+        }
+
+        .composer input {
+            flex: 1;
+            min-inline-size: 0;
+            background: transparent;
+            border: none;
+            color: var(--text-main);
+            font-size: 0.96rem;
+            outline: none;
+            padding: 8px 0;
+        }
+
+        .composer input::placeholder { color: var(--text-muted); }
+
+        .send-pill {
+            background: linear-gradient(135deg, var(--primary), var(--cyan));
+            color: #06060b;
+            border: none;
+            border-radius: 999px;
+            padding: 10px 20px;
+            font-weight: 700;
+            font-size: 0.88rem;
+            cursor: pointer;
+            transition: transform 0.12s ease;
+        }
+
+        .send-pill:active { transform: scale(0.96); }
+
+        /* ─── View 2: Memory & Tokens (Clean Bento + Pills) ─── */
+        .page-scroll {
+            flex: 1;
+            min-block-size: 0;
+            overflow-y: auto;
+            scrollbar-gutter: stable;
+            overscroll-behavior: contain;
+            padding: 26px 28px;
+        }
+
+        .page-inner {
+            max-width: 960px;
+            margin: 0 auto;
+            display: flex;
+            flex-direction: column;
+            gap: 22px;
+        }
+
+        .page-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .page-head h2 {
+            font-size: 1.35rem;
+            font-weight: 700;
+        }
+
+        .bento-stats {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 14px;
+        }
+
+        .bento-card {
+            background: var(--bg-surface);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 16px 18px;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .bento-val {
+            font-size: 1.7rem;
+            font-weight: 700;
+            color: var(--cyan);
+            letter-spacing: -0.02em;
+        }
+
+        .bento-lbl {
+            font-size: 0.82rem;
+            color: var(--text-muted);
+        }
+
+        .glass-section {
+            background: var(--bg-surface);
+            border: 1px solid var(--border);
+            border-radius: 18px;
+            padding: 18px;
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
+        }
+
+        .section-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .section-title {
+            font-size: 0.98rem;
+            font-weight: 700;
+            color: var(--text-main);
+        }
+
+        .search-input {
+            background: var(--bg-elevated);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            color: var(--text-main);
+            padding: 7px 12px;
+            font-size: 0.86rem;
+            outline: none;
+            width: 220px;
+        }
+
+        .search-input:focus { border-color: var(--cyan); }
+
+        .token-cloud {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            user-select: text;
+        }
+
+        .token-pill {
+            background: var(--bg-elevated);
+            border: 1px solid var(--border);
+            border-radius: 999px;
+            padding: 6px 12px;
+            font-size: 0.84rem;
+            display: inline-flex;
+            align-items: center;
+            gap: 7px;
+        }
+
+        .token-count {
+            color: var(--cyan);
+            font-weight: 700;
+            font-size: 0.76rem;
+        }
+
+        .memory-cards {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+            gap: 12px;
+            user-select: text;
+        }
+
+        .mem-card {
+            background: var(--bg-elevated);
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            padding: 14px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .mem-top {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 0.75rem;
+            color: var(--text-muted);
+        }
+
+        .mem-tag {
+            background: rgba(157, 78, 221, 0.18);
+            color: #d7afff;
+            padding: 2px 8px;
+            border-radius: 6px;
+            font-weight: 700;
+            font-size: 0.7rem;
+        }
+
+        .mem-body {
+            font-size: 0.88rem;
+            color: var(--text-main);
+        }
+
+        /* ─── View 3: Connect Stage ─── */
+        .connect-stage {
+            margin: auto;
+            max-width: 480px;
+            width: 100%;
+            text-align: center;
+            background: var(--bg-surface);
+            border: 1px solid var(--border);
+            border-radius: 26px;
+            padding: 36px 28px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 18px;
+            box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45);
+        }
+
+        .radar-wrap {
+            position: relative;
+            width: 96px;
+            height: 96px;
+            display: grid;
+            place-items: center;
+        }
+
+        .radar-ring {
+            position: absolute;
+            inset: 0;
+            border-radius: 50%;
+            border: 2px solid rgba(0, 240, 255, 0.35);
+            opacity: 0;
+        }
+
+        .radar-wrap.animating .radar-ring {
+            animation: radarWave 1.8s ease-out infinite;
+        }
+
+        @keyframes radarWave {
+            0% { transform: scale(0.75); opacity: 0.9; }
+            100% { transform: scale(1.45); opacity: 0; }
+        }
+
+        .progress-track {
+            width: 100%;
+            height: 8px;
+            border-radius: 999px;
+            background: var(--bg-elevated);
+            overflow: clip;
+        }
+
+        .progress-fill {
+            height: 100%;
+            width: 0%;
+            background: linear-gradient(90deg, var(--primary), var(--cyan));
+            transition: width 0.25s ease;
+        }
+
+        .btn-soft {
+            background: var(--bg-elevated);
+            border: 1px solid var(--border);
+            color: var(--text-main);
+            border-radius: 12px;
+            padding: 9px 18px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        .btn-danger {
+            background: rgba(255, 82, 82, 0.14);
+            border: 1px solid rgba(255, 82, 82, 0.35);
+            color: var(--danger);
+            border-radius: 12px;
+            padding: 9px 18px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        /* ─── Native Modals (dialog rules) ─── */
+        dialog {
+            margin: auto;
+            border: 1px solid var(--border);
+            border-radius: 22px;
+            background: var(--bg-surface);
+            color: var(--text-main);
+            padding: 24px;
+            max-width: 460px;
+            width: calc(100% - 32px);
+            box-shadow: 0 24px 64px rgba(0, 0, 0, 0.65);
+        }
+
+        dialog[open] {
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+
+        dialog:modal {
+            overscroll-behavior: contain;
+        }
+
+        dialog::backdrop {
+            background: rgba(4, 4, 9, 0.72);
+            backdrop-filter: blur(6px);
+            overflow: hidden;
+            overscroll-behavior: contain;
+        }
+
+        .field-col {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .field-col label {
+            font-size: 0.82rem;
+            color: var(--text-muted);
+            font-weight: 600;
+        }
+
+        .field-col input, .field-col textarea {
+            background: var(--bg-elevated);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            color: var(--text-main);
+            padding: 10px 12px;
+            font-size: 0.9rem;
+            outline: none;
+            font-family: inherit;
+        }
+
+        .dialog-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 10px;
+            margin-top: 4px;
+        }
+    </style>
+</head>
+<body>
+    <div class="app-shell">
+        <aside class="sidebar">
+            <div class="brand-row">
+                <img src="/studio/logo.png" alt="Shadow" class="brand-logo">
+                <div class="brand-text">
+                    <span class="brand-title">Shadow</span>
+                    <span class="brand-sub">LUNA CORE</span>
+                </div>
+            </div>
+
+            <nav class="nav-group" aria-label="Workspace views">
+                <button class="nav-btn active" onclick="switchView('chat', this)">
+                    <span>✨</span>
+                    <span>Ask Luna</span>
+                </button>
+                <button class="nav-btn" onclick="switchView('memory', this)">
+                    <span>🧠</span>
+                    <span>Memory &amp; Tokens</span>
+                    <span class="nav-badge" id="nav-tok-badge">0</span>
+                </button>
+                <button class="nav-btn" onclick="switchView('connect', this)">
+                    <span>📱</span>
+                    <span>Mobile Sync</span>
+                </button>
+            </nav>
+
+            <div class="sidebar-spacer"></div>
+
+            <button class="connect-cta" id="sidebar-connect-btn" onclick="triggerConnectToApp()">
+                <span>🔗</span>
+                <span id="sidebar-connect-label">Connect to App</span>
+            </button>
+
+            <div class="engine-footer">
+                <div class="engine-status">
+                    <span class="dot" id="engine-dot"></span>
+                    <span id="engine-label">Background Offline</span>
+                </div>
+                <div class="footer-actions">
+                    <button
+                        type="button"
+                        class="toggle-pill"
+                        id="engine-toggle"
+                        aria-label="Toggle Background Server"
+                        onclick="toggleEngine()"
+                    ></button>
+                    <button
+                        type="button"
+                        class="icon-btn"
+                        aria-label="Preferences"
+                        command="show-modal"
+                        commandfor="settings-dialog"
+                        onclick="openSettingsModal()"
+                    >⚙</button>
+                </div>
+            </div>
+        </aside>
+
+        <main class="stage">
+            <!-- View 1: Ask Luna -->
+            <section class="view active" id="view-chat">
+                <div class="chat-scroll" id="chat-scroll">
+                    <div class="chat-container" id="chat-messages">
+                        <div class="empty-hero" id="empty-hero">
+                            <img src="/studio/logo.png" alt="" class="hero-orb">
+                            <h1>Luna</h1>
+                            <p id="hero-sub">Blank-slate local AI. Sync your phone when ready, or type below to verify what it knows.</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="composer-wrap">
+                    <div class="composer">
+                        <input
+                            type="text"
+                            id="chat-input"
+                            placeholder="Test what Luna learned from your phone..."
+                            onkeydown="if(event.key==='Enter') sendChat()"
+                        >
+                        <button type="button" class="send-pill" onclick="sendChat()">Ask</button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- View 2: Permanent Memory & Tokens -->
+            <section class="view" id="view-memory">
+                <div class="page-scroll">
+                    <div class="page-inner">
+                        <div class="page-head">
+                            <h2>Learned Memory &amp; Tokens</h2>
+                            <button type="button" class="btn-danger" command="show-modal" commandfor="reset-dialog" onclick="openModal('reset-dialog')">Reset All Data</button>
+                        </div>
+
+                        <div class="bento-stats">
+                            <div class="bento-card">
+                                <span class="bento-val" id="stat-mem">0</span>
+                                <span class="bento-lbl">Synced Memories</span>
+                            </div>
+                            <div class="bento-card">
+                                <span class="bento-val" id="stat-tok">0</span>
+                                <span class="bento-lbl">Permanent Tokens</span>
+                            </div>
+                            <div class="bento-card">
+                                <span class="bento-val" id="stat-ent">0</span>
+                                <span class="bento-lbl">Recognized Entities</span>
+                            </div>
+                        </div>
+
+                        <div class="glass-section">
+                            <div class="section-head">
+                                <span class="section-title">Permanent Token Index</span>
+                                <input type="search" id="token-search" class="search-input" placeholder="Filter tokens..." oninput="renderTokens()">
+                            </div>
+                            <div class="token-cloud" id="token-cloud"></div>
+                        </div>
+
+                        <div class="glass-section">
+                            <div class="section-head">
+                                <span class="section-title">Synced Timeline</span>
+                                <span style="font-size:0.8rem;color:var(--text-muted);" id="session-summary">Stored privately on this laptop</span>
+                            </div>
+                            <div class="memory-cards" id="memory-cards"></div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- View 3: Connect to App Handshake Stage -->
+            <section class="view" id="view-connect">
+                <div class="page-scroll" style="display:flex;align-items:center;justify-content:center;">
+                    <div class="connect-stage">
+                        <div class="radar-wrap" id="radar-wrap">
+                            <div class="radar-ring"></div>
+                            <img src="/studio/logo.png" alt="" style="width:68px;height:68px;border-radius:18px;z-index:1;">
+                        </div>
+                        <h2 id="hs-title">Connect Shadow Mobile</h2>
+                        <p id="hs-desc" style="font-size:0.92rem;color:var(--text-muted);">
+                            Your phone works 100% offline. Click Connect below when you want to download learning progress onto this laptop.
+                        </p>
+                        <div class="progress-track" id="hs-track" style="display:none;">
+                            <div class="progress-fill" id="hs-fill"></div>
+                        </div>
+                        <div style="display:flex;gap:10px;">
+                            <button type="button" class="connect-cta" id="stage-connect-btn" style="width:auto;padding:11px 24px;" onclick="triggerConnectToApp()">
+                                Connect to App
+                            </button>
+                            <button type="button" class="btn-soft" id="stage-cancel-btn" style="display:none;" onclick="cancelConnect()">
+                                Cancel
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- Settings & Push Update Modal -->
+    <dialog id="settings-dialog" closedby="any" aria-labelledby="settings-title">
+        <h2 id="settings-title" style="font-size:1.15rem;">Studio Settings &amp; App Updates</h2>
+        <div class="field-col">
+            <label for="phone-url-display">Phone Sync Endpoint (Same Wi-Fi)</label>
+            <input type="text" id="phone-url-display" readonly>
+        </div>
+        <div class="field-col">
+            <label for="upd-title">Push App Update Title</label>
+            <input type="text" id="upd-title" value="Luna Core Update">
+        </div>
+        <div class="field-col">
+            <label for="upd-notes">Update Notes</label>
+            <textarea id="upd-notes" rows="3">• Improved on-device AI recall and UI polish</textarea>
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
+            <button type="button" class="btn-soft" onclick="allowFirewall()">Allow Wi-Fi Firewall</button>
+            <button type="button" class="send-pill" onclick="pushUpdate()">Send Update to Phone</button>
+        </div>
+        <div class="dialog-actions">
+            <form method="dialog">
+                <button class="btn-soft" value="close">Close</button>
+            </form>
+        </div>
+    </dialog>
+
+    <!-- Confirm Reset Modal -->
+    <dialog id="reset-dialog" aria-labelledby="reset-title">
+        <h2 id="reset-title" style="font-size:1.15rem;">Clear All Stored Memories?</h2>
+        <p style="font-size:0.9rem;color:var(--text-muted);">
+            This permanently erases all synced memories, tokens, and entities stored on this laptop back to 0.
+        </p>
+        <div class="dialog-actions">
+            <form method="dialog" style="display:flex;gap:10px;">
+                <button class="btn-soft" value="cancel" autofocus>Cancel</button>
+                <button class="btn-danger" value="confirm" onclick="confirmResetBrain()">Reset Everything</button>
+            </form>
+        </div>
+    </dialog>
+
+    <script>
+        let latestSnapshot = { memories: [], tokens: [], nodes: [], sessions: [], memories_count: 0, tokens_count: 0, nodes_count: 0 };
+        let currentPhase = 'IDLE';
+
+        function openModal(id) {
+            const dlg = document.getElementById(id);
+            if (!dlg.open) dlg.showModal();
+        }
+
+        function openSettingsModal() {
+            openModal('settings-dialog');
+        }
+
+        function switchView(name, btn) {
+            document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+            document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+            document.getElementById('view-' + name).classList.add('active');
+            if (btn) btn.classList.add('active');
+        }
+
+        function createEl(tag, cls, text) {
+            const el = document.createElement(tag);
+            if (cls) el.className = cls;
+            if (text !== undefined && text !== null) el.textContent = String(text);
+            return el;
+        }
+
+        async function apiCall(path, method = 'GET', body = null) {
+            const opts = { method, headers: { 'Content-Type': 'application/json' } };
+            if (body !== null) opts.body = JSON.stringify(body);
+            const res = await fetch(path, opts);
+            return await res.json();
+        }
+
+        async function toggleEngine() {
+            const isCurrentlyOn = document.getElementById('engine-toggle').classList.contains('on');
+            await apiCall(isCurrentlyOn ? '/ctl/stop' : '/ctl/start', 'POST', {});
+            await pollAll();
+        }
+
+        async function sendChat() {
+            const input = document.getElementById('chat-input');
+            const q = input.value.trim();
+            if (!q) return;
+            input.value = '';
+
+            const hero = document.getElementById('empty-hero');
+            if (hero) hero.style.display = 'none';
+
+            const container = document.getElementById('chat-messages');
+            container.appendChild(createEl('div', 'msg user', q));
+            const scroller = document.getElementById('chat-scroll');
+            scroller.scrollTop = scroller.scrollHeight;
+
+            try {
+                const data = await apiCall('/ctl/chat', 'POST', { query: q });
+                const cls = data.learned ? 'msg luna learned' : 'msg luna';
+                container.appendChild(createEl('div', cls, data.response || ''));
+            } catch (e) {
+                container.appendChild(createEl('div', 'msg luna', 'Background engine is paused. Turn it on at bottom-left.'));
+            }
+            scroller.scrollTop = scroller.scrollHeight;
+        }
+
+        function renderTokens() {
+            const q = (document.getElementById('token-search').value || '').trim().toLowerCase();
+            const cloud = document.getElementById('token-cloud');
+            cloud.replaceChildren();
+            const filtered = (latestSnapshot.tokens || []).filter(t => !q || t.token.toLowerCase().includes(q));
+            if (filtered.length === 0) {
+                cloud.appendChild(createEl('p', '', 'No tokens learned yet. Connect your Shadow mobile app to sync.'));
+                cloud.lastChild.style.color = 'var(--text-muted)';
+                cloud.lastChild.style.fontSize = '0.88rem';
+                return;
+            }
+            filtered.forEach(t => {
+                const pill = createEl('span', 'token-pill');
+                pill.appendChild(createEl('span', '', t.token));
+                pill.appendChild(createEl('span', 'token-count', '×' + t.frequency));
+                cloud.appendChild(pill);
+            });
+        }
+
+        function renderMemories() {
+            const grid = document.getElementById('memory-cards');
+            grid.replaceChildren();
+            const list = latestSnapshot.memories || [];
+            if (list.length === 0) {
+                const p = createEl('p', '', '0 memories stored yet.');
+                p.style.color = 'var(--text-muted)';
+                p.style.fontSize = '0.88rem';
+                grid.appendChild(p);
+                return;
+            }
+            list.forEach(m => {
+                const card = createEl('div', 'mem-card');
+                const top = createEl('div', 'mem-top');
+                top.appendChild(createEl('span', 'mem-tag', m.source_type));
+                top.appendChild(createEl('span', '', new Date(m.timestamp).toLocaleString()));
+                card.appendChild(top);
+                card.appendChild(createEl('div', 'mem-body', m.text_content || 'Metadata record'));
+                grid.appendChild(card);
+            });
+        }
+
+        async function triggerConnectToApp() {
+            const connectNavBtn = document.querySelectorAll('.nav-btn')[2];
+            switchView('connect', connectNavBtn);
+            await apiCall('/ctl/connect-app', 'POST', {});
+            await pollAll();
+        }
+
+        async function cancelConnect() {
+            await apiCall('/ctl/cancel-connect', 'POST', {});
+            await pollAll();
+        }
+
+        async function confirmResetBrain() {
+            await apiCall('/ctl/reset-brain', 'POST', {});
+            document.querySelectorAll('#chat-messages .msg').forEach(el => el.remove());
+            const hero = document.getElementById('empty-hero');
+            if (hero) hero.style.display = 'flex';
+            await pollAll();
+        }
+
+        async function pushUpdate() {
+            const title = document.getElementById('upd-title').value.trim() || 'App Update';
+            const changelog = document.getElementById('upd-notes').value.trim() || 'Improvements';
+            await apiCall('/ctl/publish', 'POST', { title, changelog, estimated_seconds: 12 });
+            document.getElementById('settings-dialog').close();
+        }
+
+        async function allowFirewall() {
+            await apiCall('/ctl/firewall', 'POST', {});
+        }
+
+        function updateHandshakeUi(hs, lanUrl) {
+            const phase = hs ? hs.phase : 'IDLE';
+            const total = hs ? (hs.total_records || 0) : 0;
+            const recv = hs ? (hs.received_records || 0) : 0;
+            const toks = hs ? (hs.received_tokens || 0) : 0;
+
+            const sideBtn = document.getElementById('sidebar-connect-btn');
+            const sideLbl = document.getElementById('sidebar-connect-label');
+            const radar = document.getElementById('radar-wrap');
+            const title = document.getElementById('hs-title');
+            const desc = document.getElementById('hs-desc');
+            const track = document.getElementById('hs-track');
+            const fill = document.getElementById('hs-fill');
+            const stageBtn = document.getElementById('stage-connect-btn');
+            const cancelBtn = document.getElementById('stage-cancel-btn');
+
+            sideBtn.classList.toggle('waiting-mobile', phase === 'WAITING_FOR_LAPTOP');
+
+            if (phase === 'WAITING_FOR_MOBILE') {
+                sideLbl.textContent = 'Waiting for Mobile...';
+                radar.classList.add('animating');
+                title.textContent = 'Waiting for Mobile App...';
+                desc.textContent = 'Open Shadow on your phone → ⋮ → Connect to Server';
+                track.style.display = 'block';
+                fill.style.width = '30%';
+                stageBtn.style.display = 'none';
+                cancelBtn.style.display = 'inline-block';
+            } else if (phase === 'WAITING_FOR_LAPTOP') {
+                sideLbl.textContent = 'Phone Ready! Connect';
+                radar.classList.add('animating');
+                title.textContent = 'Phone is Waiting';
+                desc.textContent = 'Click "Connect to App" below to start downloading learning progress.';
+                track.style.display = 'none';
+                stageBtn.style.display = 'inline-block';
+                cancelBtn.style.display = 'none';
+            } else if (phase === 'TRANSFERRING') {
+                sideLbl.textContent = 'Downloading...';
+                radar.classList.add('animating');
+                title.textContent = 'Downloading learning progress...';
+                desc.textContent = `Downloaded ${recv} / ${total} memories • ${toks} tokens`;
+                track.style.display = 'block';
+                const pct = total > 0 ? Math.min(100, Math.max(8, (recv / total) * 100)) : 65;
+                fill.style.width = pct + '%';
+                stageBtn.style.display = 'none';
+                cancelBtn.style.display = 'none';
+            } else if (phase === 'COMPLETED' && currentPhase === 'TRANSFERRING') {
+                sideLbl.textContent = 'Connect to App';
+                radar.classList.remove('animating');
+                title.textContent = 'Learning Progress Saved';
+                desc.textContent = hs.last_message || 'Permanently stored on this laptop.';
+                track.style.display = 'block';
+                fill.style.width = '100%';
+                stageBtn.style.display = 'inline-block';
+                cancelBtn.style.display = 'none';
+                setTimeout(() => {
+                    const memNav = document.querySelectorAll('.nav-btn')[1];
+                    switchView('memory', memNav);
+                }, 1300);
+            } else {
+                sideLbl.textContent = 'Connect to App';
+                radar.classList.remove('animating');
+                title.textContent = 'Connect Shadow Mobile';
+                desc.textContent = 'Ready on local Wi-Fi. Tap Connect when you want to pull learned memories and tokens from your phone.';
+                track.style.display = 'none';
+                stageBtn.style.display = 'inline-block';
+                cancelBtn.style.display = 'none';
+            }
+            currentPhase = phase;
+        }
+
+        async function pollAll() {
+            try {
+                const st = await apiCall('/ctl/studio-data');
+                latestSnapshot = st.snapshot || latestSnapshot;
+
+                const on = !!st.server_running;
+                document.getElementById('engine-dot').classList.toggle('on', on);
+                document.getElementById('engine-toggle').classList.toggle('on', on);
+                document.getElementById('engine-label').textContent = on ? 'Ready' : 'Paused';
+
+                document.getElementById('stat-mem').textContent = latestSnapshot.memories_count || 0;
+                document.getElementById('stat-tok').textContent = latestSnapshot.tokens_count || 0;
+                document.getElementById('stat-ent').textContent = latestSnapshot.nodes_count || 0;
+                document.getElementById('nav-tok-badge').textContent = latestSnapshot.tokens_count || 0;
+                document.getElementById('phone-url-display').value = st.lan_url || '';
+
+                const heroSub = document.getElementById('hero-sub');
+                if (heroSub) {
+                    const m = latestSnapshot.memories_count || 0;
+                    const t = latestSnapshot.tokens_count || 0;
+                    heroSub.textContent = m === 0
+                        ? 'Blank-slate AI. Sync your phone when ready, or ask below to verify.'
+                        : `${m} memories and ${t} learned tokens stored permanently on this laptop.`;
+                }
+
+                renderTokens();
+                renderMemories();
+                updateHandshakeUi(st.handshake, st.lan_url);
+            } catch (e) {}
+        }
+
+        pollAll();
+        setInterval(pollAll, 900);
+    </script>
+</body>
+</html>
