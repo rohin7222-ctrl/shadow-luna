@@ -60,7 +60,7 @@ interface BrainSimulationDao {
     @Query("SELECT * FROM brain_insights WHERE concept = :concept LIMIT 1")
     suspend fun getInsight(concept: String): BrainInsightEntity?
 
-    @Query("SELECT * FROM brain_insights WHERE concept LIKE '%' || :term || '%' ORDER BY total_hits DESC LIMIT :limit")
+    @Query("SELECT * FROM brain_insights WHERE concept LIKE '%' || :term || '%' ESCAPE '\\' ORDER BY total_hits DESC LIMIT :limit")
     suspend fun searchInsights(term: String, limit: Int = 8): List<BrainInsightEntity>
 
     @Query("SELECT * FROM brain_insights ORDER BY total_hits DESC, updated_at DESC LIMIT :limit")

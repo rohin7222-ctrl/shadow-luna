@@ -78,8 +78,8 @@ class VideoCollector(
             )
 
             cursor?.use { c ->
-                val idCol = c.getColumnIndexOrThrow(MediaStore.Video.Media._ID)
-                val nameCol = c.getColumnIndexOrThrow(MediaStore.Video.Media.DISPLAY_NAME)
+                val idCol = c.getColumnIndex(MediaStore.Video.Media._ID)
+                val nameCol = c.getColumnIndex(MediaStore.Video.Media.DISPLAY_NAME)
                 val bucketCol = c.getColumnIndex(MediaStore.Video.Media.BUCKET_DISPLAY_NAME)
                 val mimeCol = c.getColumnIndex(MediaStore.Video.Media.MIME_TYPE)
                 val durationCol = c.getColumnIndex(MediaStore.Video.Media.DURATION)
@@ -90,8 +90,8 @@ class VideoCollector(
                 val dateAddedCol = c.getColumnIndex(MediaStore.Video.Media.DATE_ADDED)
 
                 while (c.moveToNext()) {
-                    val mediaId = c.getLong(idCol)
-                    val displayName = c.getString(nameCol) ?: "Video_$mediaId"
+                    val mediaId = if (idCol >= 0) c.getLong(idCol) else 0L
+                    val displayName = (if (nameCol >= 0) c.getString(nameCol) else null) ?: "Video_$mediaId"
                     val bucketName = if (bucketCol >= 0) c.getString(bucketCol) else null
                     val mimeType = if (mimeCol >= 0) c.getString(mimeCol) else null
                     val durationMs = if (durationCol >= 0) c.getLong(durationCol) else 0L

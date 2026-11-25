@@ -11,6 +11,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -99,6 +100,15 @@ object LunaMemorySimulator {
         simJob?.cancel()
         simJob = null
         _snapshot.value = _snapshot.value.copy(isSimulating = false)
+    }
+
+    suspend fun stopSimulationLoopAndWait() {
+        val activeJob = simJob
+        simJob = null
+        activeJob?.cancelAndJoin()
+        passMutex.withLock {
+            _snapshot.value = SimulationSnapshot(isSimulating = false)
+        }
     }
 
     suspend fun refreshSnapshotFromDb(context: Context, running: Boolean = simJob?.isActive == true): SimulationSnapshot {
@@ -217,9 +227,11 @@ object LunaMemorySimulator {
         val prevWorld = brainDao.getWorldModelState()
         val curiosityTerm = prevWorld?.curiosityTarget?.takeIf { it.isNotBlank() }
         val curiosityBatch = if (curiosityTerm != null && nextPass % 2 == 0) {
-            recordDao.searchByText(curiosityTerm, limit = 30)
+            recordDao.searchByText(OnDeviceLunaBrain.escapeLike(curiosityTerm), limit = 30)
         } else emptyList()
-        val batch = (windowBatch + curiosityBatch).distinctBy { it.id }
+        val batch = (windowBatch + curiosityBatch)
+            .distinctBy { it.id }
+            .sortedBy { it.timestamp }
 
         if (batch.isEmpty()) {
             return refreshSnapshotFromDb(context)

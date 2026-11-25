@@ -76,8 +76,8 @@ class AudioCollector(
             )
 
             cursor?.use { c ->
-                val idCol = c.getColumnIndexOrThrow(MediaStore.Audio.Media._ID)
-                val nameCol = c.getColumnIndexOrThrow(MediaStore.Audio.Media.DISPLAY_NAME)
+                val idCol = c.getColumnIndex(MediaStore.Audio.Media._ID)
+                val nameCol = c.getColumnIndex(MediaStore.Audio.Media.DISPLAY_NAME)
                 val titleCol = c.getColumnIndex(MediaStore.Audio.Media.TITLE)
                 val artistCol = c.getColumnIndex(MediaStore.Audio.Media.ARTIST)
                 val albumCol = c.getColumnIndex(MediaStore.Audio.Media.ALBUM)
@@ -87,8 +87,8 @@ class AudioCollector(
                 val dateAddedCol = c.getColumnIndex(MediaStore.Audio.Media.DATE_ADDED)
 
                 while (c.moveToNext()) {
-                    val mediaId = c.getLong(idCol)
-                    val displayName = c.getString(nameCol) ?: "Audio_$mediaId"
+                    val mediaId = if (idCol >= 0) c.getLong(idCol) else 0L
+                    val displayName = (if (nameCol >= 0) c.getString(nameCol) else null) ?: "Audio_$mediaId"
                     val title = if (titleCol >= 0) c.getString(titleCol) else null
                     val artist = if (artistCol >= 0) c.getString(artistCol) else null
                     val album = if (albumCol >= 0) c.getString(albumCol) else null

@@ -92,4 +92,10 @@ class OnDeviceLunaBrainTest {
         val jepaOut = FutureNeuralArchitectures.jepaPredict(idMatrix, FutureNeuralArchitectures.l2Normalize(p1))
         assertTrue(kotlin.math.abs(FutureNeuralArchitectures.normSquared(jepaOut) - 1.0) < 1e-3)
     }
+
+    @Test
+    fun escapeLikeNeutralizesSqlWildcards() {
+        assertEquals("100\\%\\_done\\\\ok", OnDeviceLunaBrain.escapeLike("100%_done\\ok"))
+        assertTrue(OnDeviceLunaBrain.tokenize("%%% ___ ???").isEmpty())
+    }
 }

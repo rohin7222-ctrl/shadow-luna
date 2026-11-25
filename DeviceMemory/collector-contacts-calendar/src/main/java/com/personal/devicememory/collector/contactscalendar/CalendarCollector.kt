@@ -66,8 +66,8 @@ class CalendarCollector(
             )
 
             cursor?.use { c ->
-                val idCol = c.getColumnIndexOrThrow(CalendarContract.Events._ID)
-                val titleCol = c.getColumnIndexOrThrow(CalendarContract.Events.TITLE)
+                val idCol = c.getColumnIndex(CalendarContract.Events._ID)
+                val titleCol = c.getColumnIndex(CalendarContract.Events.TITLE)
                 val descCol = c.getColumnIndex(CalendarContract.Events.DESCRIPTION)
                 val locCol = c.getColumnIndex(CalendarContract.Events.EVENT_LOCATION)
                 val startCol = c.getColumnIndex(CalendarContract.Events.DTSTART)
@@ -77,8 +77,8 @@ class CalendarCollector(
                 val now = TimestampUtil.nowMillis()
 
                 while (c.moveToNext()) {
-                    val eventId = c.getLong(idCol)
-                    val rawTitle = c.getString(titleCol) ?: "Untitled Event"
+                    val eventId = if (idCol >= 0) c.getLong(idCol) else 0L
+                    val rawTitle = (if (titleCol >= 0) c.getString(titleCol) else null) ?: "Untitled Event"
                     val rawDesc = if (descCol >= 0) c.getString(descCol) else null
                     val location = if (locCol >= 0) c.getString(locCol) else null
                     val dtStart = if (startCol >= 0) c.getLong(startCol) else now

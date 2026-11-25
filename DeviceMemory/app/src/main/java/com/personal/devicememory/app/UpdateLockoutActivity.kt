@@ -55,6 +55,7 @@ import com.personal.devicememory.R
 import com.personal.devicememory.app.update.ShadowUpdateService
 import com.personal.devicememory.app.update.ShadowUpdateState
 import kotlinx.coroutines.delay
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.ceil
 
 /**
@@ -67,6 +68,7 @@ class UpdateLockoutActivity : ComponentActivity() {
 
     private var userClickedOk = false
     private var receiverRegistered = false
+    private val mainLaunched = AtomicBoolean(false)
 
     private val finishedReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -131,6 +133,7 @@ class UpdateLockoutActivity : ComponentActivity() {
     }
 
     private fun openMainAppAndFinish() {
+        if (!mainLaunched.compareAndSet(false, true)) return
         val intent = Intent(this, MainActivity::class.java).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
             putExtra(ShadowUpdateService.EXTRA_JUST_UPDATED, true)

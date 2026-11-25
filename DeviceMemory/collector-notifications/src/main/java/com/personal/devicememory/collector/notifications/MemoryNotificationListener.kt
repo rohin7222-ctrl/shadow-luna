@@ -117,6 +117,7 @@ class MemoryNotificationListener : NotificationListenerService() {
                 val notifTokens = Regex("""[\p{L}\p{M}\p{N}_]{2,40}""")
                     .findAll((sanitizedText ?: "").lowercase())
                     .map { it.value }
+                    .filter { tok -> tok.any { it.isLetterOrDigit() } }
                     .distinct()
                     .take(25)
                 for (tok in notifTokens) {

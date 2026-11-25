@@ -65,9 +65,10 @@ object LunaUpdatesClient {
                     readTimeout = 5000
                 }
                 val code = conn.responseCode
-                val text = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8)).readText()
+                val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+                val text = stream?.let { BufferedReader(InputStreamReader(it, Charsets.UTF_8)).use { r -> r.readText() } } ?: ""
                 if (code !in 200..299) {
-                    return@withContext Result.failure(IllegalStateException("HTTP $code"))
+                    return@withContext Result.failure(IllegalStateException("HTTP $code: $text"))
                 }
                 Result.success(json.decodeFromString<LunaUpdatesResponseDto>(text))
             } catch (e: Throwable) {
@@ -92,12 +93,14 @@ object LunaUpdatesClient {
                     readTimeout = 8000
                 }
                 val code = conn.responseCode
-                val text = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8)).readText()
+                val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+                val text = stream?.let { BufferedReader(InputStreamReader(it, Charsets.UTF_8)).use { r -> r.readText() } } ?: ""
                 if (code !in 200..299) {
-                    return@withContext Result.failure(IllegalStateException("HTTP $code"))
+                    return@withContext Result.failure(IllegalStateException("HTTP $code: $text"))
                 }
+                val safeVersion = version.replace(Regex("""[^a-zA-Z0-9._-]"""), "_")
                 val dir = File(context.filesDir, "ota_bundles").apply { mkdirs() }
-                val outFile = File(dir, "bundle_$version.json")
+                val outFile = File(dir, "bundle_$safeVersion.json")
                 outFile.writeText(text)
                 Result.success(outFile)
             } catch (e: Throwable) {

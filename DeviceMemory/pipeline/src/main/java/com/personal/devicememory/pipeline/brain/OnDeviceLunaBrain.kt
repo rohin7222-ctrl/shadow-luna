@@ -58,10 +58,16 @@ object OnDeviceLunaBrain {
         if (text.isNullOrBlank()) return emptyList()
         return TOKEN_REGEX.findAll(text.lowercase())
             .map { it.value }
+            .filter { tok -> tok.any { it.isLetterOrDigit() } }
             .distinct()
             .take(30)
             .toList()
     }
+
+    fun escapeLike(term: String): String =
+        term.replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
 
     fun levenshteinDistance(a: String, b: String): Int {
         if (a == b) return 0
@@ -190,6 +196,29 @@ object OnDeviceLunaBrain {
         }
 
         val rawTokens = tokenize(query)
+        val hasSearchableToken = rawTokens.any { tok -> tok.any { it.isLetterOrDigit() } }
+        if (!hasSearchableToken) {
+            val realTopics = topInsights.take(4).joinToString(", ") { it.concept }
+            return@withContext OfflineLunaReply(
+                query = query,
+                learned = false,
+                totalMemories = totalMemories,
+                totalTokens = totalTokens,
+                simulationPasses = simPasses,
+                associationsCount = assocCount,
+                neuralVectorsCount = allVectors.size,
+                selfPlayAccuracyPct = selfPlayAccPct,
+                jepaAccuracyPct = jepaAcc,
+                curiosityTarget = curiosity,
+                response = buildString {
+                    appendLine("⚠️ [Offline • Untrained for \"$query\"]")
+                    append("Checked $totalMemories memories & $totalTokens tokens — ask with a real word or topic name.")
+                    if (realTopics.isNotBlank()) {
+                        append(" Trained concepts: $realTopics")
+                    }
+                }
+            )
+        }
         val meaningfulTokens = rawTokens.filter { it !in STOP_QUERY_WORDS }.ifEmpty { rawTokens }
 
         val expandedTerms = LinkedHashSet<String>()
@@ -220,7 +249,7 @@ object OnDeviceLunaBrain {
         val matchedInsights = LinkedHashMap<String, BrainInsightEntity>()
         val graphNeighbors = LinkedHashSet<String>()
         for (term in expandedTerms) {
-            for (ins in brainDao.searchInsights(term, limit = 4)) {
+            for (ins in brainDao.searchInsights(escapeLike(term), limit = 4)) {
                 matchedInsights[ins.concept] = ins
                 ins.linkedConcepts.split(",")
                     .map { it.trim() }
@@ -259,12 +288,12 @@ object OnDeviceLunaBrain {
         // Score candidate memories dynamically using GRPO learned policy weights!
         val scored = linkedMapOf<String, Pair<CollectedRecordEntity, Double>>()
         val exactScore = 10.0 * policy.weightExact
-        for (rec in recordDao.searchByText(query, limit = 10)) {
+        for (rec in recordDao.searchByText(escapeLike(query), limit = 10)) {
             scored[rec.id] = rec to exactScore
         }
         for (tok in expandedTerms) {
             val baseW = (if (tok in meaningfulTokens) 4.0 else 2.2) * policy.weightExact
-            for (rec in recordDao.searchByText(tok, limit = 12)) {
+            for (rec in recordDao.searchByText(escapeLike(tok), limit = 12)) {
                 val existing = scored[rec.id]
                 val bonus = if (intent == QueryIntent.TEMPORAL) policy.weightTemporal * 0.6 else 0.0
                 if (existing != null) {
@@ -276,7 +305,7 @@ object OnDeviceLunaBrain {
         }
         for (hop in graphNeighbors.take(3)) {
             val hopBoost = 1.5 * policy.weightGraph
-            for (rec in recordDao.searchByText(hop, limit = 3)) {
+            for (rec in recordDao.searchByText(escapeLike(hop), limit = 3)) {
                 val existing = scored[rec.id]
                 if (existing != null) {
                     scored[rec.id] = existing.first to (existing.second + hopBoost)
@@ -285,7 +314,7 @@ object OnDeviceLunaBrain {
         }
         for ((vecConcept, sim) in tttSemanticNeighbors.take(3)) {
             val vecBoost = sim * 3.0 * policy.weightVector
-            for (rec in recordDao.searchByText(vecConcept, limit = 4)) {
+            for (rec in recordDao.searchByText(escapeLike(vecConcept), limit = 4)) {
                 val existing = scored[rec.id]
                 if (existing != null) {
                     scored[rec.id] = existing.first to (existing.second + vecBoost)
@@ -304,7 +333,7 @@ object OnDeviceLunaBrain {
         ).take(4)
 
         val matchedTokens = if (expandedTerms.isNotEmpty()) {
-            expandedTerms.flatMap { tokenDao.searchTokens(it, limit = 3) }
+            expandedTerms.flatMap { tokenDao.searchTokens(escapeLike(it), limit = 3) }
                 .filterNot { it.token.length > 26 && it.token.contains("_") }
                 .distinctBy { it.token }
                 .sortedByDescending { it.frequency }

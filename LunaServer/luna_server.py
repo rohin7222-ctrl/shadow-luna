@@ -229,9 +229,9 @@ class CognitiveEngine:
     def tokenize(text: str) -> List[str]:
         if not text:
             return []
-        # Extract English/Unicode Tamil tokens of length >= 2
+        # Extract English/Unicode Tamil tokens of length >= 2 containing alphanumeric characters
         tokens = re.findall(r"[\w\u0B80-\u0BFF]+", text.lower(), flags=re.UNICODE)
-        return [t for t in tokens if len(t) >= 2]
+        return [t for t in tokens if len(t) >= 2 and any(ch.isalnum() for ch in t)]
 
     @staticmethod
     def learn_from_record(record: dict, conn: sqlite3.Connection):
@@ -271,10 +271,20 @@ class CognitiveEngine:
                 (f"person:{title}", title, "PERSON", ts, ts)
             )
             if pkg:
-                c.execute(
-                    "INSERT INTO graph_edges (source_id, target_id, relation, timestamp) VALUES (?, ?, ?, ?)",
-                    (f"person:{title}", f"app:{pkg}", "INTERACTED_VIA", ts)
-                )
+                existing_edge = c.execute(
+                    "SELECT id FROM graph_edges WHERE source_id = ? AND target_id = ? AND relation = ? LIMIT 1",
+                    (f"person:{title}", f"app:{pkg}", "INTERACTED_VIA")
+                ).fetchone()
+                if existing_edge:
+                    c.execute(
+                        "UPDATE graph_edges SET weight = MIN(100.0, weight + 1.0), timestamp = MAX(timestamp, ?) WHERE id = ?",
+                        (ts, existing_edge[0])
+                    )
+                else:
+                    c.execute(
+                        "INSERT INTO graph_edges (source_id, target_id, relation, timestamp) VALUES (?, ?, ?, ?)",
+                        (f"person:{title}", f"app:{pkg}", "INTERACTED_VIA", ts)
+                    )
 
         # 4. Extract Media nodes (Photos / Screenshots)
         if source == "PHOTO":
@@ -384,6 +394,9 @@ def handshake_laptop_ready(request: Request):
         handshake_state["laptop_ready_at"] = now_ms
         if handshake_state["mobile_ready"]:
             handshake_state["phase"] = "TRANSFERRING"
+            handshake_state["total_records"] = 0
+            handshake_state["received_records"] = 0
+            handshake_state["received_tokens"] = 0
             handshake_state["last_message"] = "Downloading learning progress..."
         else:
             handshake_state["phase"] = "WAITING_FOR_MOBILE"
@@ -403,6 +416,9 @@ def handshake_mobile_ready():
         handshake_state["mobile_ready_at"] = now_ms
         if handshake_state["laptop_ready"]:
             handshake_state["phase"] = "TRANSFERRING"
+            handshake_state["total_records"] = 0
+            handshake_state["received_records"] = 0
+            handshake_state["received_tokens"] = 0
             handshake_state["last_message"] = "Both connected! Uploading learning progress..."
         else:
             handshake_state["phase"] = "WAITING_FOR_LAPTOP"
@@ -638,6 +654,10 @@ def publish_manual_update(req: PublishUpdateRequest):
     }
 
 
+def _escape_like(term: str) -> str:
+    return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 @app.post("/api/chat")
 def chat_with_luna(req: ChatRequest):
     """
@@ -646,6 +666,9 @@ def chat_with_luna(req: ChatRequest):
     Never returns canned greetings or scripted chit-chat when unlearned.
     """
     query = req.query.strip()
+    tokens = CognitiveEngine.tokenize(query)
+    has_word_token = any(any(ch.isalnum() for ch in tok) for tok in tokens)
+
     with closing(open_db(sqlite3.Row)) as conn:
         c = conn.cursor()
 
@@ -665,25 +688,37 @@ def chat_with_luna(req: ChatRequest):
                 )
             }
 
-        # 2. Match strictly against real learned memories & knowledge graph
-        tokens = CognitiveEngine.tokenize(query)
+        if not has_word_token:
+            return {
+                "query": query,
+                "learned": False,
+                "memories_total": total_memories,
+                "response": (
+                    f"⚠️ [No Learned Match • Checked {total_memories} memories / {total_vocab} tokens]\n"
+                    f"\"{query}\" — ஒரு வார்த்தை அல்லது தலைப்பைப் பயன்படுத்தி கேட்கவும்."
+                )
+            }
+
+        # 2. Match strictly against real learned memories & knowledge graph (escaped LIKE)
         scored_memories = {}
 
         # Exact phrase substring search
+        safe_query = _escape_like(query)
         phrase_rows = c.execute(
             "SELECT id, source_type, text_content, timestamp FROM memories "
-            "WHERE text_content LIKE ? ORDER BY timestamp DESC LIMIT 10",
-            (f"%{query}%",)
+            "WHERE text_content LIKE ? ESCAPE '\\' ORDER BY timestamp DESC LIMIT 10",
+            (f"%{safe_query}%",)
         ).fetchall()
         for r in phrase_rows:
             scored_memories[r["id"]] = {"row": dict(r), "score": 10}
 
         # Token-level recall
         for tok in tokens:
+            safe_tok = _escape_like(tok)
             t_rows = c.execute(
                 "SELECT id, source_type, text_content, timestamp FROM memories "
-                "WHERE text_content LIKE ? ORDER BY timestamp DESC LIMIT 10",
-                (f"%{tok}%",)
+                "WHERE text_content LIKE ? ESCAPE '\\' ORDER BY timestamp DESC LIMIT 10",
+                (f"%{safe_tok}%",)
             ).fetchall()
             for r in t_rows:
                 if r["id"] in scored_memories:
@@ -692,10 +727,11 @@ def chat_with_luna(req: ChatRequest):
                     scored_memories[r["id"]] = {"row": dict(r), "score": 1}
 
         matched_nodes = []
-        for tok in (tokens or [query.lower()]):
+        for tok in tokens:
+            safe_tok = _escape_like(tok)
             n_rows = c.execute(
-                "SELECT label, entity_type, mention_count FROM graph_nodes WHERE LOWER(label) LIKE ? LIMIT 5",
-                (f"%{tok}%",)
+                "SELECT label, entity_type, mention_count FROM graph_nodes WHERE LOWER(label) LIKE ? ESCAPE '\\' LIMIT 5",
+                (f"%{safe_tok}%",)
             ).fetchall()
             for nr in n_rows:
                 matched_nodes.append(dict(nr))

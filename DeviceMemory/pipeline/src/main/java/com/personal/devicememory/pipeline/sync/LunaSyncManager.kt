@@ -12,6 +12,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
@@ -197,64 +198,67 @@ object LunaSyncManager {
 
         val found = CompletableDeferred<String?>()
 
-        coroutineScope {
-            // Path 1: UDP broadcast beacon on port 8800
-            val udpJob = async {
-                var sock: DatagramSocket? = null
-                try {
-                    sock = DatagramSocket()
-                    findWifiNetwork(context)?.bindSocket(sock)
-                    sock.broadcast = true
-                    sock.soTimeout = 1000
-                    val probe = "SHADOW_DISCOVER_V1".toByteArray(Charsets.UTF_8)
-                    val targets = (listOf("255.255.255.255") + prefixes.map { "$it.255" }).distinct()
-                    for (t in targets) {
-                        try {
-                            sock.send(DatagramPacket(probe, probe.size, InetAddress.getByName(t), DISCOVERY_UDP_PORT))
-                        } catch (_: Throwable) {}
+        val discovered = coroutineScope {
+            val searchJob = launch {
+                // Path 1: UDP broadcast beacon on port 8800
+                val udpJob = async {
+                    var sock: DatagramSocket? = null
+                    try {
+                        sock = DatagramSocket()
+                        findWifiNetwork(context)?.bindSocket(sock)
+                        sock.broadcast = true
+                        sock.soTimeout = 1000
+                        val probe = "SHADOW_DISCOVER_V1".toByteArray(Charsets.UTF_8)
+                        val targets = (listOf("255.255.255.255") + prefixes.map { "$it.255" }).distinct()
+                        for (t in targets) {
+                            try {
+                                sock.send(DatagramPacket(probe, probe.size, InetAddress.getByName(t), DISCOVERY_UDP_PORT))
+                            } catch (_: Throwable) {}
+                        }
+                        val buf = ByteArray(512)
+                        val respPkt = DatagramPacket(buf, buf.size)
+                        sock.receive(respPkt)
+                        val msg = String(respPkt.data, 0, respPkt.length, Charsets.UTF_8)
+                        if (msg.contains("shadow-luna")) {
+                            val ip = respPkt.address.hostAddress
+                            if (!ip.isNullOrBlank()) {
+                                val candidate = "http://$ip:8000"
+                                if (pingServer(context, candidate, 800)) {
+                                    found.complete(candidate)
+                                }
+                            }
+                        }
+                    } catch (_: Throwable) {
+                    } finally {
+                        try { sock?.close() } catch (_: Throwable) {}
                     }
-                    val buf = ByteArray(512)
-                    val respPkt = DatagramPacket(buf, buf.size)
-                    sock.receive(respPkt)
-                    val msg = String(respPkt.data, 0, respPkt.length, Charsets.UTF_8)
-                    if (msg.contains("shadow-luna")) {
-                        val ip = respPkt.address.hostAddress
-                        if (!ip.isNullOrBlank()) {
-                            val candidate = "http://$ip:8000"
-                            if (pingServer(context, candidate, 800)) {
-                                found.complete(candidate)
+                }
+
+                // Path 2: Parallel bounded /24 TCP ping sweep
+                val sem = Semaphore(48)
+                val scanJobs = prefixes.flatMap { prefix ->
+                    (1..254).map { host ->
+                        val ip = "$prefix.$host"
+                        async {
+                            if (found.isCompleted || ip in ownIps) return@async
+                            sem.withPermit {
+                                if (found.isCompleted) return@withPermit
+                                val candidate = "http://$ip:8000"
+                                if (pingServer(context, candidate, 450)) {
+                                    found.complete(candidate)
+                                }
                             }
                         }
                     }
-                } catch (_: Throwable) {
-                } finally {
-                    try { sock?.close() } catch (_: Throwable) {}
                 }
+
+                awaitAll(udpJob, *scanJobs.toTypedArray())
+                if (!found.isCompleted) found.complete(null)
             }
 
-            // Path 2: Parallel bounded /24 TCP ping sweep
-            val sem = Semaphore(48)
-            val scanJobs = prefixes.flatMap { prefix ->
-                (1..254).map { host ->
-                    val ip = "$prefix.$host"
-                    async {
-                        if (found.isCompleted || ip in ownIps) return@async
-                        sem.withPermit {
-                            if (found.isCompleted) return@withPermit
-                            val candidate = "http://$ip:8000"
-                            if (pingServer(context, candidate, 450)) {
-                                found.complete(candidate)
-                            }
-                        }
-                    }
-                }
-            }
-
-            awaitAll(udpJob, *scanJobs.toTypedArray())
-            if (!found.isCompleted) found.complete(null)
+            // Return immediately on first discovery and cancel any remaining socket waits
+            found.await().also { if (it != null) searchJob.cancel() }
         }
-
-        val discovered = found.await()
         if (discovered != null) {
             LunaServerConfig.setServerUrl(context, discovered)
         }
@@ -321,19 +325,19 @@ object LunaSyncManager {
         val recordDao = db.collectedRecordDao()
         val tokenDao = db.learnedTokenDao()
 
+        var uploaded = 0
+        var tokensSent = 0
+        var tokensIncluded = false
+
         try {
             val totalUnsynced = recordDao.countUnsynced()
-            val allTokens = tokenDao.getTopTokens(500).map {
+            val allTokens = tokenDao.getTopTokens(2000).map {
                 LunaTokenDto(it.token, it.frequency, it.lastSource, it.lastSeen)
             }
 
             val initProg = json.encodeToString(HandshakeProgressDto(totalUnsynced, 0, 0))
             requestJson(context, "$serverUrl/api/handshake/progress", "POST", initProg)
             onProgress(0, totalUnsynced, 0)
-
-            var uploaded = 0
-            var tokensSent = 0
-            var tokensIncluded = false
 
             while (true) {
                 val batch = recordDao.getUnsynced(BATCH_SIZE)
@@ -400,7 +404,7 @@ object LunaSyncManager {
         } catch (e: Throwable) {
             Log.e(TAG, "Handshake upload failed", e)
             val remaining = try { recordDao.countUnsynced() } catch (_: Throwable) { 0 }
-            SyncResult(false, 0, 0, remaining, e.message ?: "Upload interrupted")
+            SyncResult(false, uploaded, tokensSent, remaining, e.message ?: "Upload interrupted")
         }
     }
 

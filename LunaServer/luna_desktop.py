@@ -192,6 +192,11 @@ class LunaServerController:
         except Exception:
             pass
         finally:
+            try:
+                if proc.stdout:
+                    proc.stdout.close()
+            except Exception:
+                pass
             self.write_runtime_state(self.is_running())
 
     def stop_server(self) -> tuple[bool, str]:
@@ -407,19 +412,20 @@ def start_control_http_server(ctrl: LunaServerController):
             self._send_bytes(code, "application/json; charset=utf-8", json.dumps(payload, ensure_ascii=False).encode("utf-8"))
 
         def do_GET(self):
-            if self.path == "/studio" or self.path == "/":
+            path_only = self.path.split("?", 1)[0]
+            if path_only == "/studio" or path_only == "/":
                 try:
                     with open(STUDIO_HTML_PATH, "rb") as f:
                         self._send_bytes(200, "text/html; charset=utf-8", f.read())
                 except Exception as e:
                     self._send_json(500, {"error": str(e)})
-            elif self.path == "/studio/logo.png":
+            elif path_only == "/studio/logo.png":
                 try:
                     with open(PNG_LOGO_PATH, "rb") as f:
                         self._send_bytes(200, "image/png", f.read())
                 except Exception:
                     self._send_json(404, {"error": "Logo missing"})
-            elif self.path == "/ctl/studio-data":
+            elif path_only == "/ctl/studio-data":
                 running = ctrl.is_running()
                 ctrl.wifi_ip = get_wifi_ip()
                 snap = ctrl.get_db_snapshot()
@@ -441,14 +447,15 @@ def start_control_http_server(ctrl: LunaServerController):
                         "handshake": hs,
                     },
                 )
-            elif self.path == "/ctl/status":
+            elif path_only == "/ctl/status":
                 self._send_json(200, ctrl.status_dict())
-            elif self.path == "/ctl/logs":
+            elif path_only == "/ctl/logs":
                 self._send_json(200, {"logs": list(ctrl.log_buffer)})
             else:
                 self._send_json(404, {"error": "Unknown endpoint"})
 
         def do_POST(self):
+            path_only = self.path.split("?", 1)[0]
             length = int(self.headers.get("Content-Length", "0") or 0)
             raw_body = self.rfile.read(length).decode("utf-8") if length > 0 else "{}"
             try:
@@ -456,16 +463,16 @@ def start_control_http_server(ctrl: LunaServerController):
             except Exception:
                 body = {}
 
-            if self.path == "/ctl/start":
+            if path_only == "/ctl/start":
                 ok, msg = ctrl.start_server()
                 self._send_json(200, {"ok": ok, "message": msg, **ctrl.status_dict()})
-            elif self.path == "/ctl/stop":
+            elif path_only == "/ctl/stop":
                 ok, msg = ctrl.stop_server()
                 self._send_json(200, {"ok": ok, "message": msg, **ctrl.status_dict()})
-            elif self.path == "/ctl/restart":
+            elif path_only == "/ctl/restart":
                 ok, msg = ctrl.restart_server()
                 self._send_json(200, {"ok": ok, "message": msg, **ctrl.status_dict()})
-            elif self.path == "/ctl/connect-app":
+            elif path_only == "/ctl/connect-app":
                 if not ctrl.is_running():
                     ctrl.start_server()
                     time.sleep(1.2)
@@ -480,7 +487,7 @@ def start_control_http_server(ctrl: LunaServerController):
                         self._send_bytes(200, "application/json; charset=utf-8", resp.read())
                 except Exception as e:
                     self._send_json(200, {"phase": "ERROR", "error": str(e)})
-            elif self.path == "/ctl/cancel-connect":
+            elif path_only == "/ctl/cancel-connect":
                 if ctrl.is_running():
                     try:
                         req = urllib.request.Request(
@@ -494,7 +501,7 @@ def start_control_http_server(ctrl: LunaServerController):
                     except Exception:
                         pass
                 self._send_json(200, {"phase": "IDLE"})
-            elif self.path == "/ctl/chat":
+            elif path_only == "/ctl/chat":
                 if not ctrl.is_running():
                     ctrl.start_server()
                     time.sleep(1.0)
@@ -509,17 +516,17 @@ def start_control_http_server(ctrl: LunaServerController):
                         self._send_bytes(200, "application/json; charset=utf-8", resp.read())
                 except Exception as e:
                     self._send_json(500, {"error": str(e)})
-            elif self.path == "/ctl/publish":
+            elif path_only == "/ctl/publish":
                 res = ctrl.publish_update(
                     body.get("title", "Server Code Update"),
                     body.get("changelog", "Updated from Studio"),
                     int(body.get("estimated_seconds", 12)),
                 )
                 self._send_json(200, res)
-            elif self.path == "/ctl/reset-brain":
+            elif path_only == "/ctl/reset-brain":
                 ctrl.reset_brain()
                 self._send_json(200, {"ok": True})
-            elif self.path == "/ctl/firewall":
+            elif path_only == "/ctl/firewall":
                 ps_inner = (
                     "netsh advfirewall firewall delete rule name='Shadow Luna Server 8000' 2>$null; "
                     "netsh advfirewall firewall add rule name='Shadow Luna Server 8000' dir=in action=allow protocol=TCP localport=8000 profile=any; "
@@ -533,7 +540,7 @@ def start_control_http_server(ctrl: LunaServerController):
                     self._send_json(200, {"ok": True, "message": "Approve the Windows admin prompt to allow mobile sync."})
                 except Exception as e:
                     self._send_json(500, {"ok": False, "error": str(e)})
-            elif self.path == "/ctl/focus":
+            elif path_only == "/ctl/focus":
                 ctrl.focus_window()
                 self._send_json(200, {"ok": True})
             else:

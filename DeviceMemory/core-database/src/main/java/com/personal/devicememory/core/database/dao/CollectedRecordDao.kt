@@ -34,7 +34,7 @@ interface CollectedRecordDao {
     @Query("UPDATE collected_records SET processed_flag = 1 WHERE id IN (:ids)")
     suspend fun markSynced(ids: List<String>)
 
-    @Query("SELECT * FROM collected_records WHERE text_content LIKE '%' || :term || '%' ORDER BY timestamp DESC LIMIT :limit")
+    @Query("SELECT * FROM collected_records WHERE text_content LIKE '%' || :term || '%' ESCAPE '\\' ORDER BY timestamp DESC LIMIT :limit")
     suspend fun searchByText(term: String, limit: Int = 10): List<CollectedRecordEntity>
 
     @Query("SELECT * FROM collected_records ORDER BY timestamp DESC LIMIT :limit")

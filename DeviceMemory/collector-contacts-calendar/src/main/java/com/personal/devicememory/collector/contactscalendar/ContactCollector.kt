@@ -63,15 +63,15 @@ class ContactCollector(
             )
 
             cursor?.use { c ->
-                val idCol = c.getColumnIndexOrThrow(ContactsContract.Contacts._ID)
-                val nameCol = c.getColumnIndexOrThrow(ContactsContract.Contacts.DISPLAY_NAME_PRIMARY)
+                val idCol = c.getColumnIndex(ContactsContract.Contacts._ID)
+                val nameCol = c.getColumnIndex(ContactsContract.Contacts.DISPLAY_NAME_PRIMARY)
                 val updatedCol = c.getColumnIndex(ContactsContract.Contacts.CONTACT_LAST_UPDATED_TIMESTAMP)
 
                 val now = TimestampUtil.nowMillis()
 
                 while (c.moveToNext()) {
-                    val contactId = c.getString(idCol)
-                    val rawName = c.getString(nameCol) ?: "Unnamed Contact"
+                    val contactId = (if (idCol >= 0) c.getString(idCol) else null) ?: ""
+                    val rawName = (if (nameCol >= 0) c.getString(nameCol) else null) ?: "Unnamed Contact"
                     val updatedTime = if (updatedCol >= 0) c.getLong(updatedCol) else now
                     val effectiveTime = if (updatedTime > 0) updatedTime else now
 

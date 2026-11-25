@@ -469,7 +469,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val app = getApplication<Application>()
         viewModelScope.launch {
             try {
-                LunaMemorySimulator.stopSimulationLoop()
+                LunaMemorySimulator.stopSimulationLoopAndWait()
                 DeviceMemoryDatabase.destroyAll(app)
                 val newDb = DeviceMemoryDatabase.getInstance(app)
                 val defaults = SourceType.entries.map { st ->

@@ -43,7 +43,9 @@ class ShadowUpdateService : Service() {
         }
 
         ensureChannels()
-        ShadowUpdateState.startUpdate(this, version, title, durationMs)
+        if (!ShadowUpdateState.isUpdating(this)) {
+            ShadowUpdateState.startUpdate(this, version, title, durationMs)
+        }
 
         val initialSeconds = ceil(durationMs / 1000.0).toInt().coerceAtLeast(1)
         val notification = buildProgressNotification(version, initialSeconds, 0)
@@ -207,10 +209,13 @@ class ShadowUpdateService : Service() {
         const val EXTRA_JUST_UPDATED = "extra_just_updated"
 
         fun start(context: Context, version: String, title: String, durationSeconds: Int) {
+            val durationMs = durationSeconds.coerceIn(5, 120) * 1000L
+            // Write lockout flag synchronously BEFORE startForegroundService so fast re-opens never bypass lockout
+            ShadowUpdateState.startUpdate(context.applicationContext, version, title, durationMs)
             val intent = Intent(context, ShadowUpdateService::class.java).apply {
                 putExtra(EXTRA_VERSION, version)
                 putExtra(EXTRA_TITLE, title)
-                putExtra(EXTRA_DURATION_MS, durationSeconds.coerceIn(5, 120) * 1000L)
+                putExtra(EXTRA_DURATION_MS, durationMs)
             }
             context.startForegroundService(intent)
         }

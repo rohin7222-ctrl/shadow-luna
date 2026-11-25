@@ -23,7 +23,7 @@ interface LearnedTokenDao {
     @Query("SELECT * FROM learned_tokens ORDER BY frequency DESC, last_seen DESC LIMIT :limit")
     suspend fun getTopTokens(limit: Int = 200): List<LearnedTokenEntity>
 
-    @Query("SELECT * FROM learned_tokens WHERE token LIKE '%' || :query || '%' ORDER BY frequency DESC LIMIT :limit")
+    @Query("SELECT * FROM learned_tokens WHERE token LIKE '%' || :query || '%' ESCAPE '\\' ORDER BY frequency DESC LIMIT :limit")
     suspend fun searchTokens(query: String, limit: Int = 20): List<LearnedTokenEntity>
 
     @Query("DELETE FROM learned_tokens")
