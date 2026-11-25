@@ -101,8 +101,12 @@ class MemoryNotificationListener : NotificationListenerService() {
                 // Apply sensitive content filter (redact OTPs, passwords, bank cards, etc.)
                 val sanitizedText = SensitiveContentFilter.redact(record.textContent)
 
+                val entityId = UUID.nameUUIDFromBytes(
+                    "NOTIFICATION|${record.timestamp}|${parsed.contentHash}".toByteArray(Charsets.UTF_8)
+                ).toString()
+
                 val entity = CollectedRecordEntity(
-                    id = UUID.randomUUID().toString(),
+                    id = entityId,
                     sourceType = SourceType.NOTIFICATION.name,
                     timestamp = record.timestamp,
                     textContent = sanitizedText,
@@ -111,7 +115,11 @@ class MemoryNotificationListener : NotificationListenerService() {
                     createdAt = now
                 )
 
-                db.collectedRecordDao().insertAll(listOf(entity))
+                val insertedRowIds = db.collectedRecordDao().insertAll(listOf(entity))
+                val insertedRowId = insertedRowIds.firstOrNull() ?: -1L
+                if (insertedRowId < 0L) {
+                    return@launch
+                }
 
                 // Index redacted notification tokens locally offline for OnDeviceLunaBrain
                 val notifTokens = Regex("""[\p{L}\p{M}\p{N}_]{2,40}""")

@@ -534,7 +534,16 @@ def reset_brain():
         c.execute("DELETE FROM graph_edges")
         c.execute("DELETE FROM user_state")
         c.execute("DELETE FROM learned_tokens")
+        c.execute("DELETE FROM sync_sessions")
         conn.commit()
+    with handshake_lock:
+        handshake_state["laptop_ready"] = False
+        handshake_state["mobile_ready"] = False
+        handshake_state["phase"] = "IDLE"
+        handshake_state["total_records"] = 0
+        handshake_state["received_records"] = 0
+        handshake_state["received_tokens"] = 0
+        handshake_state["last_message"] = ""
     return {"status": "RESET_COMPLETE", "total_memories": 0}
 
 

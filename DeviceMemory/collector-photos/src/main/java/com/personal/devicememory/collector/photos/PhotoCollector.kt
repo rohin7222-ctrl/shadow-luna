@@ -79,8 +79,8 @@ class PhotoCollector(
             )
 
             cursor?.use { c ->
-                val idCol = c.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
-                val nameCol = c.getColumnIndexOrThrow(MediaStore.Images.Media.DISPLAY_NAME)
+                val idCol = c.getColumnIndex(MediaStore.Images.Media._ID)
+                val nameCol = c.getColumnIndex(MediaStore.Images.Media.DISPLAY_NAME)
                 val bucketCol = c.getColumnIndex(MediaStore.Images.Media.BUCKET_DISPLAY_NAME)
                 val mimeCol = c.getColumnIndex(MediaStore.Images.Media.MIME_TYPE)
                 val dateTakenCol = c.getColumnIndex(MediaStore.Images.Media.DATE_TAKEN)
@@ -90,8 +90,8 @@ class PhotoCollector(
                 val heightCol = c.getColumnIndex(MediaStore.Images.Media.HEIGHT)
 
                 while (c.moveToNext()) {
-                    val mediaId = c.getLong(idCol)
-                    val displayName = c.getString(nameCol) ?: "Image_$mediaId"
+                    val mediaId = if (idCol >= 0) c.getLong(idCol) else 0L
+                    val displayName = (if (nameCol >= 0) c.getString(nameCol) else null) ?: "Image_$mediaId"
                     val bucketName = if (bucketCol >= 0) c.getString(bucketCol) else null
                     val mimeType = if (mimeCol >= 0) c.getString(mimeCol) else null
                     val dateTaken = if (dateTakenCol >= 0) c.getLong(dateTakenCol) else 0L

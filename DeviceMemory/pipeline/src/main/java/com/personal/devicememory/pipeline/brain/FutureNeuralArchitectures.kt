@@ -253,6 +253,7 @@ object FutureNeuralArchitectures {
                 }
             }
             ffScores[pair.tokenA] = 0.7 * (ffScores[pair.tokenA] ?: 0.5) + 0.3 * goodPos
+            ffScores[pair.tokenB] = 0.7 * (ffScores[pair.tokenB] ?: 0.5) + 0.3 * goodPos
 
             // Forward-Forward Negative Pass (synthetic mismatched negative sample)
             if (concepts.size >= 4) {

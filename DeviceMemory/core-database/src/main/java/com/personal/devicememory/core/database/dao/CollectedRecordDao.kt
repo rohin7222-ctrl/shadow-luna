@@ -11,7 +11,7 @@ import kotlinx.coroutines.flow.Flow
 interface CollectedRecordDao {
 
     @Insert(onConflict = OnConflictStrategy.IGNORE)
-    suspend fun insertAll(records: List<CollectedRecordEntity>)
+    suspend fun insertAll(records: List<CollectedRecordEntity>): List<Long>
 
     @Query("SELECT COUNT(*) FROM collected_records WHERE source_type = :sourceType")
     suspend fun countBySource(sourceType: String): Int
