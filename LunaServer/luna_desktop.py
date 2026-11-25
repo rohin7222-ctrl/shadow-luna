@@ -9,6 +9,7 @@ import threading
 import time
 import urllib.request
 from collections import deque
+from contextlib import closing
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -252,27 +253,26 @@ class LunaServerController:
                 "latest_version": "2.2.0", "memories": [], "nodes": [], "tokens": [], "sessions": [], "updates": []
             }
         try:
-            conn = sqlite3.connect(DB_PATH)
-            conn.row_factory = sqlite3.Row
-            c = conn.cursor()
-            mem_count = c.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
-            node_count = c.execute("SELECT COUNT(*) FROM graph_nodes").fetchone()[0]
-            tok_count = c.execute("SELECT COUNT(*) FROM learned_tokens").fetchone()[0]
-            updates = [dict(r) for r in c.execute("SELECT * FROM app_updates ORDER BY released_at DESC LIMIT 20").fetchall()]
-            memories = [dict(r) for r in c.execute("SELECT * FROM memories ORDER BY timestamp DESC LIMIT 40").fetchall()]
-            nodes = [dict(r) for r in c.execute("SELECT * FROM graph_nodes ORDER BY mention_count DESC LIMIT 30").fetchall()]
-            tokens = []
-            sessions = []
-            try:
-                tokens = [dict(r) for r in c.execute("SELECT * FROM learned_tokens ORDER BY frequency DESC, last_seen DESC LIMIT 150").fetchall()]
-            except Exception:
-                pass
-            try:
-                sessions = [dict(r) for r in c.execute("SELECT * FROM sync_sessions ORDER BY synced_at DESC LIMIT 10").fetchall()]
-            except Exception:
-                pass
+            with closing(sqlite3.connect(DB_PATH, timeout=15.0)) as conn:
+                conn.row_factory = sqlite3.Row
+                c = conn.cursor()
+                mem_count = c.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+                node_count = c.execute("SELECT COUNT(*) FROM graph_nodes").fetchone()[0]
+                tok_count = c.execute("SELECT COUNT(*) FROM learned_tokens").fetchone()[0]
+                updates = [dict(r) for r in c.execute("SELECT * FROM app_updates ORDER BY released_at DESC LIMIT 20").fetchall()]
+                memories = [dict(r) for r in c.execute("SELECT * FROM memories ORDER BY timestamp DESC LIMIT 40").fetchall()]
+                nodes = [dict(r) for r in c.execute("SELECT * FROM graph_nodes ORDER BY mention_count DESC LIMIT 30").fetchall()]
+                tokens = []
+                sessions = []
+                try:
+                    tokens = [dict(r) for r in c.execute("SELECT * FROM learned_tokens ORDER BY frequency DESC, last_seen DESC LIMIT 150").fetchall()]
+                except Exception:
+                    pass
+                try:
+                    sessions = [dict(r) for r in c.execute("SELECT * FROM sync_sessions ORDER BY synced_at DESC LIMIT 10").fetchall()]
+                except Exception:
+                    pass
             db_bytes = os.path.getsize(DB_PATH)
-            conn.close()
             latest_ver = updates[0]["version"] if updates else "2.2.0"
             return {
                 "memories_count": mem_count,
@@ -309,22 +309,21 @@ class LunaServerController:
             except Exception:
                 pass
 
-        conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row
-        c = conn.cursor()
-        rows = c.execute("SELECT version FROM app_updates ORDER BY released_at DESC").fetchall()
-        latest = rows[0]["version"] if rows else "2.2.0"
-        parts = [int(x) if x.isdigit() else 0 for x in latest.split(".")]
-        while len(parts) < 3:
-            parts.append(0)
-        next_ver = f"{parts[0]}.{parts[1]}.{parts[2] + 1}"
-        now_ms = int(time.time() * 1000)
-        c.execute(
-            "INSERT INTO app_updates (version, title, changelog, released_at, estimated_seconds, code_hash) VALUES (?, ?, ?, ?, ?, ?)",
-            (next_ver, title, changelog, now_ms, max(5, estimated_seconds), f"manual-{now_ms}"),
-        )
-        conn.commit()
-        conn.close()
+        with closing(sqlite3.connect(DB_PATH, timeout=15.0)) as conn:
+            conn.row_factory = sqlite3.Row
+            c = conn.cursor()
+            rows = c.execute("SELECT version FROM app_updates ORDER BY released_at DESC").fetchall()
+            latest = rows[0]["version"] if rows else "2.2.0"
+            parts = [int(x) if x.isdigit() else 0 for x in latest.split(".")]
+            while len(parts) < 3:
+                parts.append(0)
+            next_ver = f"{parts[0]}.{parts[1]}.{parts[2] + 1}"
+            now_ms = int(time.time() * 1000)
+            c.execute(
+                "INSERT INTO app_updates (version, title, changelog, released_at, estimated_seconds, code_hash) VALUES (?, ?, ?, ?, ?, ?)",
+                (next_ver, title, changelog, now_ms, max(5, estimated_seconds), f"manual-{now_ms}"),
+            )
+            conn.commit()
         return {"status": "PUBLISHED", "version": next_ver, "released_at": now_ms}
 
     def reset_brain(self):
@@ -336,14 +335,13 @@ class LunaServerController:
             except Exception:
                 pass
         if os.path.exists(DB_PATH):
-            conn = sqlite3.connect(DB_PATH)
-            for tbl in ("memories", "graph_nodes", "graph_edges", "user_state", "learned_tokens", "sync_sessions"):
-                try:
-                    conn.execute(f"DELETE FROM {tbl}")
-                except Exception:
-                    pass
-            conn.commit()
-            conn.close()
+            with closing(sqlite3.connect(DB_PATH, timeout=15.0)) as conn:
+                for tbl in ("memories", "graph_nodes", "graph_edges", "user_state", "learned_tokens", "sync_sessions"):
+                    try:
+                        conn.execute(f"DELETE FROM {tbl}")
+                    except Exception:
+                        pass
+                conn.commit()
         self.append_log("Luna AI Brain reset to 0 memories.")
 
     def status_dict(self) -> dict:
@@ -531,10 +529,10 @@ def start_control_http_server(ctrl: LunaServerController):
                 cmd = f'Start-Process powershell -Verb RunAs -Wait -ArgumentList "-NoProfile","-Command","{ps_inner}"'
                 try:
                     subprocess.Popen(["powershell", "-NoProfile", "-Command", cmd])
-                except Exception:
-                    pass
-                _fw_cache["checked_at"] = 0.0
-                self._send_json(200, {"ok": True})
+                    _fw_cache["checked_at"] = 0.0
+                    self._send_json(200, {"ok": True, "message": "Approve the Windows admin prompt to allow mobile sync."})
+                except Exception as e:
+                    self._send_json(500, {"ok": False, "error": str(e)})
             elif self.path == "/ctl/focus":
                 ctrl.focus_window()
                 self._send_json(200, {"ok": True})

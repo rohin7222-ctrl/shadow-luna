@@ -910,6 +910,7 @@
                         <div class="fw-warn-box" id="fw-warning-box">
                             <span id="fw-warn-text">Windows Firewall is blocking phone connections on Wi-Fi. Allow access once so your phone can sync.</span>
                             <button type="button" class="btn-warn" onclick="allowFirewall()">Allow Mobile Sync (Firewall)</button>
+                            <span id="fw-action-status" style="font-size:0.78rem;color:var(--cyan);display:none;"></span>
                         </div>
                         <p id="hs-desc" style="font-size:0.92rem;color:var(--text-muted);">
                             Your phone works 100% offline. Click Connect below when you want to download learning progress onto this laptop.
@@ -950,6 +951,7 @@
             <button type="button" class="btn-soft" onclick="allowFirewall()">Allow Wi-Fi Firewall</button>
             <button type="button" class="send-pill" onclick="pushUpdate()">Send Update to Phone</button>
         </div>
+        <div id="settings-status" style="font-size:0.82rem;color:var(--cyan);min-height:1.1em;"></div>
         <div class="dialog-actions">
             <form method="dialog">
                 <button class="btn-soft" value="close">Close</button>
@@ -1099,12 +1101,34 @@
         async function pushUpdate() {
             const title = document.getElementById('upd-title').value.trim() || 'App Update';
             const changelog = document.getElementById('upd-notes').value.trim() || 'Improvements';
-            await apiCall('/ctl/publish', 'POST', { title, changelog, estimated_seconds: 12 });
-            document.getElementById('settings-dialog').close();
+            const statusEl = document.getElementById('settings-status');
+            if (statusEl) statusEl.textContent = 'Publishing update...';
+            try {
+                const res = await apiCall('/ctl/publish', 'POST', { title, changelog, estimated_seconds: 12 });
+                if (statusEl) statusEl.textContent = res.version ? `Published v${res.version} for Shadow Mobile.` : 'Update published.';
+                setTimeout(() => document.getElementById('settings-dialog').close(), 900);
+            } catch (e) {
+                if (statusEl) statusEl.textContent = 'Could not publish update.';
+            }
         }
 
         async function allowFirewall() {
-            await apiCall('/ctl/firewall', 'POST', {});
+            const statusEl = document.getElementById('settings-status');
+            const fwStatus = document.getElementById('fw-action-status');
+            if (statusEl) statusEl.textContent = 'Opening Windows Firewall prompt...';
+            if (fwStatus) { fwStatus.style.display = 'block'; fwStatus.textContent = 'Opening Windows Firewall prompt...'; }
+            try {
+                const res = await apiCall('/ctl/firewall', 'POST', {});
+                const msg = res.ok === false
+                    ? (res.error || 'Failed to trigger firewall prompt.')
+                    : (res.message || 'Approve the Windows admin prompt, then wait 2s.');
+                if (statusEl) statusEl.textContent = msg;
+                if (fwStatus) fwStatus.textContent = msg;
+                setTimeout(pollAll, 2000);
+            } catch (e) {
+                if (statusEl) statusEl.textContent = 'Failed to trigger firewall prompt.';
+                if (fwStatus) { fwStatus.style.display = 'block'; fwStatus.textContent = 'Failed to trigger firewall prompt.'; }
+            }
         }
 
         function updateHandshakeUi(hs, lanUrl) {

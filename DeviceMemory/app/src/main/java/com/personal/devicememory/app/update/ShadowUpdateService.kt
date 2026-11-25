@@ -63,10 +63,12 @@ class ShadowUpdateService : Service() {
     private suspend fun runUpdatePipeline(version: String, durationMs: Long) {
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         try {
-            // Download real bundle from LunaServer while countdown progresses smoothly
-            val bundleResult = LunaUpdatesClient.downloadUpdateBundle(applicationContext, version)
-            if (bundleResult.isFailure) {
-                Log.w(TAG, "Bundle download warning (continuing staged refresh): ${bundleResult.exceptionOrNull()?.message}")
+            // Download real bundle concurrently so the countdown never stalls if LAN endpoint is slow
+            serviceScope.launch {
+                val bundleResult = LunaUpdatesClient.downloadUpdateBundle(applicationContext, version)
+                if (bundleResult.isFailure) {
+                    Log.w(TAG, "Bundle download warning (continuing staged refresh): ${bundleResult.exceptionOrNull()?.message}")
+                }
             }
 
             var lastShownSec = -1

@@ -17,6 +17,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.util.Calendar
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
@@ -65,6 +67,7 @@ object LunaMemorySimulator {
     private val simScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var simJob: Job? = null
     private val foregroundActive = AtomicBoolean(true)
+    private val passMutex = Mutex()
 
     private val _snapshot = MutableStateFlow(SimulationSnapshot())
     val snapshot: StateFlow<SimulationSnapshot> = _snapshot.asStateFlow()
@@ -191,7 +194,7 @@ object LunaMemorySimulator {
         var lastSeen: Long = 0L
     )
 
-    suspend fun runSinglePass(context: Context): SimulationSnapshot {
+    suspend fun runSinglePass(context: Context): SimulationSnapshot = passMutex.withLock {
         val db = DeviceMemoryDatabase.getInstance(context)
         val recordDao = db.collectedRecordDao()
         val brainDao = db.brainSimulationDao()

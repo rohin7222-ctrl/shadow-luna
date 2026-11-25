@@ -7,19 +7,24 @@ package com.personal.devicememory.core.common.filter
 object SensitiveContentFilter {
 
     private val REDACTION_RULES: List<Pair<Regex, String>> = listOf(
-        // OTP patterns: "OTP is 123456", "code: 482910", "verification code 1234"
+        // OTP patterns: "OTP is 123456", "OTP is: 954123", "code: 482910", "உங்கள் OTP குறியீடு 894512"
         Regex(
-            """(?i)\b(?:otp|verification\s*code|one[- ]?time\s*(?:password|code|pin))\s*(?:is|:|=|-)?\s*(\d{4,8})\b"""
+            """(?i)\b(?:otp|verification\s*code|one[- ]?time\s*(?:password|code|pin))\s*(?:குறியீடு\s*)?(?:is\s*[:=\-]?|[:=\-])?\s*(\d{4,8})\b"""
         ) to "[OTP_REDACTED]",
 
         // Password patterns: "password: xyz", "pwd = abc123", "passcode: 1234"
         Regex(
-            """(?i)\b(?:password|passwd|pwd|passcode|pin)\s*(?:is|:|=|-)\s*\S+"""
+            """(?i)\b(?:password|passwd|pwd|passcode|pin)\s*(?:is\s*[:=\-]?|[:=\-])\s*\S+"""
         ) to "[PASSWORD_REDACTED]",
 
-        // Credit/debit card numbers (13-19 digits, with optional spaces/dashes)
+        // Bank account numbers BEFORE card/Aadhaar patterns: "a/c" or "account" followed by 9-18 digits
         Regex(
-            """\b(?:\d[ -]?){13,19}\b"""
+            """(?i)\b(?:a/?c|account)\s*(?:no\.?|number|num|#)?\s*(?:is\s*[:=\-]?|[:=\-])?\s*\d{9,18}\b"""
+        ) to "[ACCOUNT_REDACTED]",
+
+        // Credit/debit card numbers (13-19 digits, strictly ending on a digit)
+        Regex(
+            """\b\d(?:[ -]?\d){12,18}\b"""
         ) to "[CARD_REDACTED]",
 
         // UPI IDs: name@upi, name@ybl, name@paytm, etc.
@@ -36,11 +41,6 @@ object SensitiveContentFilter {
         Regex(
             """\b\d{4}\s?\d{4}\s?\d{4}\b"""
         ) to "[AADHAAR_REDACTED]",
-
-        // Bank account numbers: "a/c" or "account" followed by 9-18 digits
-        Regex(
-            """(?i)\b(?:a/?c|account)\s*(?:no\.?|number|num|#)?\s*:?\s*\d{9,18}\b"""
-        ) to "[ACCOUNT_REDACTED]",
 
         // CVV patterns
         Regex(

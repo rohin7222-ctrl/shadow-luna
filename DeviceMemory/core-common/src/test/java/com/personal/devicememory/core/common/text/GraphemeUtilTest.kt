@@ -31,11 +31,11 @@ class GraphemeUtilTest {
         // H(1) e(1) l(1) l(1) o(1) = 5
         // ' ' (1)
         // 🌟 (1)
-        // Total = 14 grapheme clusters
+        // Total = 5 + 1 + 5 + 1 + 1 = 13 grapheme clusters
         val text = "வணக்கம் Hello 🌟"
         val clusters = GraphemeUtil.toGraphemeClusters(text)
         
-        assertEquals(14, clusters.size)
+        assertEquals(13, clusters.size)
         assertEquals("வ", clusters[0])
         assertEquals("க்", clusters[2])
         assertEquals("🌟", clusters.last())

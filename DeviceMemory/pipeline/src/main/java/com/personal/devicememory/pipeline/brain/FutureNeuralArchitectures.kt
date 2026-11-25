@@ -351,6 +351,8 @@ object FutureNeuralArchitectures {
         var curiosityConcept = prevWorld.curiosityTarget
         val toSave = ArrayList<FutureMemoryCellEntity>(concepts.size)
         for (c in concepts) {
+            val pVec = poincare[c] ?: continue
+            val mVec = cmsMid[c] ?: continue
             val liq = liquid[c] ?: 0.35
             val err = jepaErrors[c] ?: 0.5
             val ff = ffScores[c] ?: 0.5
@@ -362,8 +364,8 @@ object FutureNeuralArchitectures {
             toSave.add(
                 FutureMemoryCellEntity(
                     concept = c,
-                    poincareCsv = encode16(poincare[c]!!),
-                    cmsMidCsv = encode16(cmsMid[c]!!),
+                    poincareCsv = encode16(pVec),
+                    cmsMidCsv = encode16(mVec),
                     liquidState = liq,
                     ffGoodness = ff,
                     jepaPredError = err,

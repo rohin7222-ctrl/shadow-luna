@@ -102,9 +102,11 @@ object TamilSemanticChunker {
                     )
                 }
 
-                // Overlap: retain trailing clusters for context
-                val overlap = if (currentClusters.size > overlapGraphemes) {
-                    currentClusters.takeLast(overlapGraphemes)
+                // Overlap: retain trailing clusters strictly within remaining budget
+                val maxAllowedOverlap = (maxGraphemes - sentenceClusters.size).coerceAtLeast(0)
+                val effectiveOverlap = overlapGraphemes.coerceAtMost(maxAllowedOverlap)
+                val overlap = if (currentClusters.size > effectiveOverlap) {
+                    currentClusters.takeLast(effectiveOverlap)
                 } else {
                     currentClusters
                 }

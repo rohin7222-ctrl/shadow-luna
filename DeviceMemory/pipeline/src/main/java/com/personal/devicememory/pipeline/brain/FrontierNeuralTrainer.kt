@@ -222,11 +222,13 @@ object FrontierNeuralTrainer {
         }
 
         // 3. Persist updated neural weights to encrypted Room DB
-        val updatedEntities = distinctConcepts.map { c ->
+        val updatedEntities = distinctConcepts.mapNotNull { c ->
+            val vec = vecs[c] ?: return@mapNotNull null
+            val mom = moms[c] ?: return@mapNotNull null
             NeuralVectorEntity(
                 concept = c,
-                vectorCsv = encodeVector(vecs[c]!!),
-                momentumCsv = encodeVector(moms[c]!!),
+                vectorCsv = encodeVector(vec),
+                momentumCsv = encodeVector(mom),
                 fisherImportance = fishers[c] ?: 0.0,
                 surpriseScore = surprises[c] ?: 0.0,
                 updateSteps = steps[c] ?: 1,
