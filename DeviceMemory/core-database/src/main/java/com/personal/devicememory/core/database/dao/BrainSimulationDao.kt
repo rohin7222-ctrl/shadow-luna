@@ -5,6 +5,7 @@ import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import com.personal.devicememory.core.database.entity.BrainInsightEntity
+import com.personal.devicememory.core.database.entity.CausalTransitionEntity
 import com.personal.devicememory.core.database.entity.FutureMemoryCellEntity
 import com.personal.devicememory.core.database.entity.LearnedAssociationEntity
 import com.personal.devicememory.core.database.entity.NeuralPolicyStateEntity
@@ -150,4 +151,48 @@ interface BrainSimulationDao {
 
     @Query("DELETE FROM world_model_state")
     suspend fun clearWorldModelState()
+
+    // ─── STDP Asymmetric Causal Sequence Transitions ───
+    @Query("""
+        INSERT INTO causal_transitions (transition_key, from_concept, to_concept, stdp_weight, transition_count, avg_delta_ms, last_seen_ms)
+        VALUES (:transitionKey, :fromConcept, :toConcept, :deltaStdp, 1, :deltaMs, :lastSeenMs)
+        ON CONFLICT(transition_key) DO UPDATE SET
+            stdp_weight = MIN(100.0, stdp_weight * 0.94 + :deltaStdp),
+            transition_count = transition_count + 1,
+            avg_delta_ms = ((avg_delta_ms * transition_count) + :deltaMs) / (transition_count + 1),
+            last_seen_ms = MAX(last_seen_ms, :lastSeenMs)
+    """)
+    suspend fun reinforceCausalTransition(
+        transitionKey: String,
+        fromConcept: String,
+        toConcept: String,
+        deltaStdp: Double,
+        deltaMs: Long,
+        lastSeenMs: Long
+    )
+
+    @Query("""
+        SELECT * FROM causal_transitions
+        WHERE from_concept = :fromConcept
+        ORDER BY stdp_weight DESC, transition_count DESC
+        LIMIT :limit
+    """)
+    suspend fun getNextCausalTransitions(fromConcept: String, limit: Int = 5): List<CausalTransitionEntity>
+
+    @Query("SELECT * FROM causal_transitions ORDER BY stdp_weight DESC, transition_count DESC LIMIT :limit")
+    suspend fun getTopCausalTransitions(limit: Int = 10): List<CausalTransitionEntity>
+
+    @Query("SELECT COUNT(*) FROM causal_transitions")
+    suspend fun countCausalTransitions(): Int
+
+    @Query("""
+        DELETE FROM causal_transitions
+        WHERE transition_key NOT IN (
+            SELECT transition_key FROM causal_transitions ORDER BY stdp_weight DESC, last_seen_ms DESC LIMIT :keepLimit
+        )
+    """)
+    suspend fun trimCausalTransitions(keepLimit: Int = 1500)
+
+    @Query("DELETE FROM causal_transitions")
+    suspend fun clearCausalTransitions()
 }

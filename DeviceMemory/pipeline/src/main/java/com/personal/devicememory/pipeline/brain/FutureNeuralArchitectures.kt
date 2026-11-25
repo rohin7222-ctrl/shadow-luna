@@ -130,6 +130,46 @@ object FutureNeuralArchitectures {
         return FloatArray(FUTURE_DIM) { i -> parts.getOrNull(i)?.toFloatOrNull() ?: 0.55f }
     }
 
+    /** STDP asymmetric spike-timing plasticity kernel: closer forward intervals strongly potentiate causal links. */
+    fun computeStdpPotentiation(deltaMs: Long): Double {
+        val clamped = deltaMs.coerceIn(0L, 30 * 60_000L)
+        val deltaMins = clamped / 60_000.0
+        return (0.95 * exp(-deltaMins / 12.0)).coerceIn(0.12, 0.95)
+    }
+
+    /** Multi-step JEPA latent rollout predicting next horizon concepts (z_t -> z_{t+1} -> z_{t+2} ...). */
+    fun predictMultiStepTrajectory(
+        anchorConcept: String,
+        allCells: List<FutureMemoryCellEntity>,
+        worldState: WorldModelStateEntity?,
+        horizon: Int = 3
+    ): List<Pair<String, Double>> {
+        if (allCells.isEmpty() || worldState == null || worldState.jepaMatrixCsv.isBlank()) return emptyList()
+        val cellMap = allCells.associateBy { it.concept }
+        val anchor = cellMap[anchorConcept]
+            ?: allCells.firstOrNull { it.concept.contains(anchorConcept) || anchorConcept.contains(it.concept) }
+            ?: return emptyList()
+        val matrix = decodeMatrix(worldState.jepaMatrixCsv)
+        var currentState = decode16(anchor.cmsMidCsv)
+        val visited = hashSetOf(anchor.concept)
+        val rollout = ArrayList<Pair<String, Double>>(horizon)
+
+        repeat(horizon.coerceIn(1, 4)) {
+            val predNext = jepaPredict(matrix, currentState)
+            val best = allCells
+                .asSequence()
+                .filter { it.concept !in visited }
+                .map { cell -> cell to FrontierNeuralTrainer.cosineSimilarity(predNext, decode16(cell.cmsMidCsv)) }
+                .filter { it.second > 0.18 }
+                .maxByOrNull { it.second }
+                ?: return@repeat
+            visited.add(best.first.concept)
+            rollout.add(best.first.concept to best.second)
+            currentState = decode16(best.first.cmsMidCsv)
+        }
+        return rollout
+    }
+
     /** Forward-Forward local layer goodness G(a, b) using local Hadamard pairing. */
     fun forwardForwardGoodness(a: FloatArray, b: FloatArray, ffWeights: FloatArray): Double {
         var sqSum = 0.0
@@ -345,6 +385,20 @@ object FutureNeuralArchitectures {
                     jepaMatrix[rowOff + col] = (jepaMatrix[rowOff + col] * 0.996f + deltaW).coerceIn(-2.0f, 2.0f)
                 }
             }
+
+            // STDP asymmetric causal plasticity link (currC -> nextC)
+            val stdpGain = computeStdpPotentiation(delta)
+            brainDao.reinforceCausalTransition(
+                transitionKey = "$currC->$nextC",
+                fromConcept = currC,
+                toConcept = nextC,
+                deltaStdp = stdpGain,
+                deltaMs = delta,
+                lastSeenMs = ts
+            )
+        }
+        if (passIndex % 6 == 0) {
+            brainDao.trimCausalTransitions(1500)
         }
 
         // 4) Persist Future Memory Cells & Select Active Inference Epistemic Curiosity Target

@@ -460,6 +460,7 @@ fun MainScreen(
                         jepaAccuracyPct = uiState.jepaAccuracyPct,
                         curiosityTarget = uiState.curiosityTarget,
                         topPolicyStrategy = uiState.topPolicyStrategy,
+                        topCausalChain = uiState.topCausalChain,
                         topTopics = uiState.topSimulatedTopics,
                         onSendMessage = onSendOfflineMessage
                     )
@@ -543,6 +544,7 @@ private fun OfflineChatScreen(
     jepaAccuracyPct: Int,
     curiosityTarget: String,
     topPolicyStrategy: String,
+    topCausalChain: String,
     topTopics: List<String>,
     onSendMessage: (String) -> Unit
 ) {
@@ -624,7 +626,8 @@ private fun OfflineChatScreen(
                         } else {
                             val policyNote = if (topPolicyStrategy.isNotBlank()) " • Policy: $topPolicyStrategy" else ""
                             val curiosityNote = if (curiosityTarget.isNotBlank()) " • Curiosity: \"$curiosityTarget\"" else ""
-                            "Titans + TTT + GRPO + JEPA + Poincaré active over $totalRecords memories ($neuralVectorsCount vecs • JEPA $jepaAccuracyPct% • GRPO $selfPlayAccuracyPct%$policyNote$curiosityNote)."
+                            val causalNote = if (topCausalChain.isNotBlank()) " • Chain: $topCausalChain" else ""
+                            "Matryoshka + TTT-Attn + GRPO + JEPA + STDP active over $totalRecords memories ($neuralVectorsCount vecs • JEPA $jepaAccuracyPct% • GRPO $selfPlayAccuracyPct%$policyNote$causalNote$curiosityNote)."
                         },
                         style = MaterialTheme.typography.bodySmall,
                         color = TextMuted,

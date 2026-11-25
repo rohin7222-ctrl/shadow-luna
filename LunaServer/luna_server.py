@@ -142,6 +142,18 @@ def init_db():
                 summary TEXT
             )
         ''')
+        # 8. STDP Sequential Causal Transitions (learns "what follows what" strictly from synced data)
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS learned_transitions (
+                transition_key TEXT PRIMARY KEY,
+                from_concept TEXT NOT NULL,
+                to_concept TEXT NOT NULL,
+                weight REAL DEFAULT 1.0,
+                transition_count INTEGER DEFAULT 1,
+                last_seen INTEGER DEFAULT 0
+            )
+        ''')
+        c.execute("CREATE INDEX IF NOT EXISTS idx_transitions_from ON learned_transitions(from_concept)")
         conn.commit()
 
 
@@ -308,6 +320,73 @@ class CognitiveEngine:
                 "ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = ?",
                 (title, ts, title, ts)
             )
+
+    @staticmethod
+    def primary_concept(record: dict) -> Optional[str]:
+        text = record.get("text_content") or ""
+        toks = CognitiveEngine.tokenize(text)
+        stop = {"com", "sec", "android", "app", "photo", "video", "audio", "screenshot", "sending", "file", "from", "with"}
+        for t in toks:
+            if len(t) >= 3 and t not in stop:
+                return t
+        try:
+            meta = json.loads(record.get("metadata_json") or "{}")
+            pkg = meta.get("package") or ""
+            if pkg:
+                return pkg.split(".")[-1].lower()
+        except Exception:
+            pass
+        return toks[0] if toks else None
+
+    @staticmethod
+    def learn_sequence_transitions(records_sorted: List[dict], conn: sqlite3.Connection):
+        import math
+        c = conn.cursor()
+        for i in range(len(records_sorted) - 1):
+            r_a, r_b = records_sorted[i], records_sorted[i + 1]
+            dt = r_b["timestamp"] - r_a["timestamp"]
+            if dt < 0 or dt > 1_800_000:
+                continue
+            ca = CognitiveEngine.primary_concept(r_a)
+            cb = CognitiveEngine.primary_concept(r_b)
+            if not ca or not cb or ca == cb:
+                continue
+            stdp_gain = max(0.15, min(0.95, 0.95 * math.exp(-(dt / 60_000.0) / 12.0)))
+            tkey = f"{ca}->{cb}"
+            c.execute(
+                "INSERT INTO learned_transitions (transition_key, from_concept, to_concept, weight, transition_count, last_seen) "
+                "VALUES (?, ?, ?, ?, 1, ?) ON CONFLICT(transition_key) DO UPDATE SET "
+                "weight = MIN(100.0, weight * 0.94 + ?), transition_count = transition_count + 1, last_seen = MAX(last_seen, ?)",
+                (tkey, ca, cb, stdp_gain, r_b["timestamp"], stdp_gain, r_b["timestamp"])
+            )
+
+    @staticmethod
+    def levenshtein(a: str, b: str) -> int:
+        if a == b:
+            return 0
+        if not a:
+            return len(b)
+        if not b:
+            return len(a)
+        prev = list(range(len(b) + 1))
+        for i, ca in enumerate(a, 1):
+            curr = [i]
+            for j, cb in enumerate(b, 1):
+                curr.append(min(curr[-1] + 1, prev[j] + 1, prev[j - 1] + (0 if ca == cb else 1)))
+            prev = curr
+        return prev[-1]
+
+    @staticmethod
+    def trigram_similarity(a: str, b: str) -> float:
+        if a == b:
+            return 1.0
+        if len(a) < 3 or len(b) < 3:
+            return 0.7 if (a in b or b in a) else 0.0
+        ta = {a[i:i + 3] for i in range(len(a) - 2)}
+        tb = {b[i:i + 3] for i in range(len(b) - 2)}
+        inter = len(ta & tb)
+        union = len(ta | tb)
+        return (inter / union) if union > 0 else 0.0
 
 
 # ─── API Schemas ───
@@ -493,6 +572,7 @@ def sync_memories(payload: SyncPayload):
 
     with closing(open_db()) as conn:
         c = conn.cursor()
+        newly_saved_records = []
         for r in payload.records:
             c.execute(
                 "INSERT OR IGNORE INTO memories (id, source_type, timestamp, text_content, metadata_json, created_at) "
@@ -501,7 +581,13 @@ def sync_memories(payload: SyncPayload):
             )
             if c.rowcount > 0:
                 saved += 1
-                CognitiveEngine.learn_from_record(r.model_dump(), conn)
+                rd = r.model_dump()
+                newly_saved_records.append(rd)
+                CognitiveEngine.learn_from_record(rd, conn)
+
+        if len(newly_saved_records) >= 2:
+            newly_saved_records.sort(key=lambda x: x["timestamp"])
+            CognitiveEngine.learn_sequence_transitions(newly_saved_records, conn)
 
         for tok in payload.tokens:
             t_clean = tok.token.strip().lower()
@@ -535,6 +621,7 @@ def reset_brain():
         c.execute("DELETE FROM user_state")
         c.execute("DELETE FROM learned_tokens")
         c.execute("DELETE FROM sync_sessions")
+        c.execute("DELETE FROM learned_transitions")
         conn.commit()
     with handshake_lock:
         handshake_state["laptop_ready"] = False
@@ -667,16 +754,45 @@ def _escape_like(term: str) -> str:
     return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
+def _resolve_temporal_window(query_lower: str):
+    from datetime import timedelta
+    now_dt = datetime.now()
+    day_start = now_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+    if any(w in query_lower for w in ("yesterday", "நேற்று", "நேத்து")):
+        s = int((day_start - timedelta(days=1)).timestamp() * 1000)
+        e = int(day_start.timestamp() * 1000) - 1
+        return s, e, "Yesterday"
+    if any(w in query_lower for w in ("today", "இன்று", "இன்னிக்கு")):
+        s = int(day_start.timestamp() * 1000)
+        e = int(now_dt.timestamp() * 1000)
+        return s, e, "Today"
+    if any(w in query_lower for w in ("last week", "இந்த வாரம்")):
+        s = int((day_start - timedelta(days=7)).timestamp() * 1000)
+        e = int(now_dt.timestamp() * 1000)
+        return s, e, "Last 7 days"
+    return None
+
+
 @app.post("/api/chat")
 def chat_with_luna(req: ChatRequest):
     """
-    Zero-Prebuilt-Knowledge Inference Endpoint.
-    Returns ONLY patterns, entities, or episodic memories genuinely learned from user's synced device data.
-    Never returns canned greetings or scripted chit-chat when unlearned.
+    Zero-Prebuilt-Knowledge Inference Endpoint (CognitiveEngine v3).
+    Combines BM25 specificity + recency decay + Levenshtein/3-gram fuzzy matching +
+    STDP sequential causal chains + temporal window filtering strictly from synced user data.
+    Never returns canned greetings or pre-seeded knowledge when unlearned.
     """
+    import math
     query = req.query.strip()
+    q_lower = query.lower()
     tokens = CognitiveEngine.tokenize(query)
     has_word_token = any(any(ch.isalnum() for ch in tok) for tok in tokens)
+
+    stop_words = {
+        "what", "when", "where", "which", "who", "how", "why", "about", "tell", "show",
+        "did", "does", "have", "been", "from", "with", "this", "that", "your", "the",
+        "and", "for", "then", "next", "after", "eppo", "enna", "yaar", "pati", "patti",
+        "sollu", "kaatu", "pannen", "use", "apram", "aparam", "today", "yesterday"
+    }
 
     with closing(open_db(sqlite3.Row)) as conn:
         c = conn.cursor()
@@ -708,46 +824,136 @@ def chat_with_luna(req: ChatRequest):
                 )
             }
 
-        # 2. Match strictly against real learned memories & knowledge graph (escaped LIKE)
+        # Summary / profile overview intent
+        is_summary = len(q_lower.split()) >= 2 and any(
+            k in q_lower for k in ("summary", "pattern", "habit", "learned", "profile", "overview", "ella", "kathukitta")
+        )
+        if is_summary:
+            top_nodes = c.execute("SELECT label, entity_type, mention_count FROM graph_nodes ORDER BY mention_count DESC LIMIT 5").fetchall()
+            top_toks = c.execute("SELECT token, frequency FROM learned_tokens ORDER BY frequency DESC LIMIT 6").fetchall()
+            top_chains = c.execute("SELECT from_concept, to_concept, transition_count FROM learned_transitions ORDER BY weight DESC LIMIT 4").fetchall()
+            lines = [f"🧠 [Cognitive Profile • {total_memories} memories • {total_vocab} tokens]"]
+            if top_nodes:
+                lines.append("Top Entities: " + ", ".join(f"{r['label']} (×{r['mention_count']})" for r in top_nodes))
+            if top_chains:
+                lines.append("STDP Causal Chains: " + " • ".join(f"{r['from_concept']} → {r['to_concept']} (×{r['transition_count']})" for r in top_chains))
+            if top_toks:
+                lines.append("Top Signals: " + ", ".join(f"{r['token']} (×{r['frequency']})" for r in top_toks))
+            return {
+                "query": query,
+                "learned": True,
+                "memories_total": total_memories,
+                "response": "\n".join(lines)
+            }
+
+        meaningful = [t for t in tokens if t not in stop_words] or tokens
+
+        # Fuzzy Levenshtein + Trigram expansion against learned vocabulary & graph nodes
+        vocab_rows = c.execute("SELECT token FROM learned_tokens ORDER BY frequency DESC LIMIT 300").fetchall()
+        node_rows = c.execute("SELECT LOWER(label) AS lbl FROM graph_nodes ORDER BY mention_count DESC LIMIT 120").fetchall()
+        vocab_pool = list(dict.fromkeys([r["token"] for r in vocab_rows] + [r["lbl"] for r in node_rows if r["lbl"]]))
+
+        expanded_terms = list(meaningful)
+        fuzzy_matches = []
+        for t in meaningful:
+            if len(t) < 4 or t in vocab_pool:
+                continue
+            max_dist = 2 if len(t) >= 6 else 1
+            best_lev = None
+            best_d = max_dist + 1
+            for v in vocab_pool:
+                if abs(len(v) - len(t)) <= max_dist:
+                    d = CognitiveEngine.levenshtein(t, v)
+                    if 1 <= d < best_d:
+                        best_d = d
+                        best_lev = v
+            if best_lev:
+                if best_lev not in expanded_terms:
+                    expanded_terms.append(best_lev)
+                fuzzy_matches.append(f"{t} → {best_lev}")
+            else:
+                best_ng = None
+                best_sim = 0.42
+                for v in vocab_pool:
+                    sim = CognitiveEngine.trigram_similarity(t, v)
+                    if sim >= best_sim:
+                        best_sim = sim
+                        best_ng = v
+                if best_ng:
+                    if best_ng not in expanded_terms:
+                        expanded_terms.append(best_ng)
+                    fuzzy_matches.append(f"{t} ≈ {best_ng}")
+
+        now_ms = int(time.time() * 1000)
         scored_memories = {}
+
+        def add_score(row_dict: dict, delta: float):
+            age_days = max(0.0, (now_ms - row_dict["timestamp"]) / 86_400_000.0)
+            recency = 0.78 + 0.35 * math.exp(-age_days / 14.0)
+            rid = row_dict["id"]
+            if rid in scored_memories:
+                scored_memories[rid]["score"] += delta * recency
+            else:
+                scored_memories[rid] = {"row": row_dict, "score": delta * recency}
 
         # Exact phrase substring search
         safe_query = _escape_like(query)
-        phrase_rows = c.execute(
+        for r in c.execute(
             "SELECT id, source_type, text_content, timestamp FROM memories "
             "WHERE text_content LIKE ? ESCAPE '\\' ORDER BY timestamp DESC LIMIT 10",
             (f"%{safe_query}%",)
-        ).fetchall()
-        for r in phrase_rows:
-            scored_memories[r["id"]] = {"row": dict(r), "score": 10}
+        ).fetchall():
+            add_score(dict(r), 10.0)
 
-        # Token-level recall
-        for tok in tokens:
+        # BM25 specificity-weighted token recall
+        for tok in expanded_terms:
             safe_tok = _escape_like(tok)
             t_rows = c.execute(
                 "SELECT id, source_type, text_content, timestamp FROM memories "
-                "WHERE text_content LIKE ? ESCAPE '\\' ORDER BY timestamp DESC LIMIT 10",
+                "WHERE text_content LIKE ? ESCAPE '\\' ORDER BY timestamp DESC LIMIT 15",
                 (f"%{safe_tok}%",)
             ).fetchall()
+            specificity = min(2.2, max(0.8, 1.0 + math.log(1.0 + 15.0 / max(1, len(t_rows)))))
+            base_w = (4.0 if tok in meaningful else 2.4) * specificity
             for r in t_rows:
-                if r["id"] in scored_memories:
-                    scored_memories[r["id"]]["score"] += 2
-                else:
-                    scored_memories[r["id"]] = {"row": dict(r), "score": 1}
+                add_score(dict(r), base_w)
+
+        # Temporal window filter ("yesterday", "today", "நேற்று", "இன்று")
+        tw = _resolve_temporal_window(q_lower)
+        if tw:
+            s_ms, e_ms, tw_label = tw
+            for r in c.execute(
+                "SELECT id, source_type, text_content, timestamp FROM memories "
+                "WHERE timestamp BETWEEN ? AND ? ORDER BY timestamp DESC LIMIT 20",
+                (s_ms, e_ms)
+            ).fetchall():
+                add_score(dict(r), 4.5)
+        else:
+            tw_label = None
 
         matched_nodes = []
-        for tok in tokens:
+        for tok in expanded_terms:
             safe_tok = _escape_like(tok)
-            n_rows = c.execute(
+            for nr in c.execute(
                 "SELECT label, entity_type, mention_count FROM graph_nodes WHERE LOWER(label) LIKE ? ESCAPE '\\' LIMIT 5",
                 (f"%{safe_tok}%",)
-            ).fetchall()
-            for nr in n_rows:
+            ).fetchall():
                 matched_nodes.append(dict(nr))
+
+        anchor = expanded_terms[0] if expanded_terms else None
+        causal_next = []
+        if anchor:
+            causal_next = [
+                dict(tr) for tr in c.execute(
+                    "SELECT to_concept, transition_count, weight FROM learned_transitions "
+                    "WHERE from_concept = ? ORDER BY weight DESC, transition_count DESC LIMIT 3",
+                    (anchor,)
+                ).fetchall()
+            ]
 
     ranked = sorted(scored_memories.values(), key=lambda x: (x["score"], x["row"]["timestamp"]), reverse=True)[:5]
 
-    if not ranked and not matched_nodes:
+    if not ranked and not matched_nodes and not causal_next:
         return {
             "query": query,
             "learned": False,
@@ -758,7 +964,14 @@ def chat_with_luna(req: ChatRequest):
             )
         }
 
-    lines = [f"🧠 [Learned Memory Recall • {total_memories} total memories]"]
+    lines = [f"🧠 [CognitiveEngine v3 • {total_memories} memories • {total_vocab} tokens]"]
+    if tw_label:
+        lines.append(f"Temporal Window: {tw_label}")
+    if fuzzy_matches:
+        lines.append(f"Fuzzy / Stem Match: {', '.join(fuzzy_matches)}")
+    if causal_next:
+        chain_txt = " → ".join(f"{n['to_concept']} (×{n['transition_count']})" for n in causal_next)
+        lines.append(f"STDP Causal Next: {anchor} → {chain_txt}")
     if matched_nodes:
         entities_str = ", ".join(f"{n['label']} ({n['entity_type']} ×{n['mention_count']})" for n in matched_nodes[:4])
         lines.append(f"Graph Entities: {entities_str}")

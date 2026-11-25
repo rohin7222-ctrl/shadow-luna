@@ -14,8 +14,8 @@ android {
         applicationId = "com.personal.devicememory"
         minSdk = 26
         targetSdk = 35
-        versionCode = 9
-        versionName = "0.5.3"
+        versionCode = 10
+        versionName = "0.6.0"
         ndk {
             abiFilters.addAll(listOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64"))
         }

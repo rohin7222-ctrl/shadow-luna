@@ -95,6 +95,7 @@ data class MainUiState(
     val topPolicyStrategy: String = "",
     val jepaAccuracyPct: Int = 0,
     val curiosityTarget: String = "",
+    val topCausalChain: String = "",
     val topSimulatedTopics: List<String> = emptyList(),
 )
 
@@ -125,6 +126,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         topPolicyStrategy = snap.topPolicyStrategy,
                         jepaAccuracyPct = snap.jepaAccuracyPct,
                         curiosityTarget = snap.curiosityTarget,
+                        topCausalChain = snap.topCausalChain,
                         topSimulatedTopics = snap.topSimulatedConcepts
                     )
                 }

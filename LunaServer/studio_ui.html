@@ -888,6 +888,14 @@
 
                         <div class="glass-section">
                             <div class="section-head">
+                                <span class="section-title">Causal Habit Chains (STDP)</span>
+                                <span style="font-size:0.8rem;color:var(--text-muted);">Sequential patterns learned from timeline</span>
+                            </div>
+                            <div class="token-cloud" id="causal-cloud"></div>
+                        </div>
+
+                        <div class="glass-section">
+                            <div class="section-head">
                                 <span class="section-title">Synced Timeline</span>
                                 <span style="font-size:0.8rem;color:var(--text-muted);" id="session-summary">Stored privately on this laptop</span>
                             </div>
@@ -1052,6 +1060,26 @@
                 const pill = createEl('span', 'token-pill');
                 pill.appendChild(createEl('span', '', t.token));
                 pill.appendChild(createEl('span', 'token-count', '×' + t.frequency));
+                cloud.appendChild(pill);
+            });
+        }
+
+        function renderTransitions() {
+            const cloud = document.getElementById('causal-cloud');
+            if (!cloud) return;
+            cloud.replaceChildren();
+            const list = latestSnapshot.transitions || [];
+            if (list.length === 0) {
+                const p = createEl('p', '', 'No causal sequences learned yet.');
+                p.style.color = 'var(--text-muted)';
+                p.style.fontSize = '0.88rem';
+                cloud.appendChild(p);
+                return;
+            }
+            list.forEach(tr => {
+                const pill = createEl('span', 'token-pill');
+                pill.appendChild(createEl('span', '', `${tr.from_concept} → ${tr.to_concept}`));
+                pill.appendChild(createEl('span', 'token-count', '×' + tr.transition_count));
                 cloud.appendChild(pill);
             });
         }
@@ -1245,6 +1273,7 @@
                 }
 
                 renderTokens();
+                renderTransitions();
                 renderMemories();
                 updateHandshakeUi(st.handshake, st.lan_url);
             } catch (e) {}

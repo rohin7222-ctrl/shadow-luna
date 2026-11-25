@@ -33,4 +33,18 @@ class TemporalAnchorExtractorTest {
         assertTrue(phrases.contains("tomorrow"))
         assertTrue(phrases.contains("evening"))
     }
+
+    @Test
+    fun testClockTimeAndQueryWindowResolution() {
+        val refMillis = Instant.parse("2026-11-24T10:00:00Z").toEpochMilli()
+        val anchors = TemporalAnchorExtractor.extractAnchors("Doctor appointment tomorrow 5:30 pm", refMillis)
+        assertTrue(anchors.any { it.matchedPhrase.equals("tomorrow", ignoreCase = true) })
+        assertTrue(anchors.any { it.matchedPhrase.equals("5:30 pm", ignoreCase = true) })
+
+        val win = TemporalAnchorExtractor.extractQueryWindow("what did i do yesterday morning", refMillis)
+        assertTrue(win != null)
+        assertEquals(5, win!!.preferredHourStart)
+        assertEquals(11, win.preferredHourEnd)
+        assertTrue(win.endMillis < refMillis + 86_400_000L)
+    }
 }

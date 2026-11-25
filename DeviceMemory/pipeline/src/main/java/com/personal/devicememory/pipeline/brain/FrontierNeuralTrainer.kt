@@ -35,6 +35,7 @@ data class TrainingStepMetrics(
 object FrontierNeuralTrainer {
 
     const val EMBEDDING_DIM = 32
+    const val MATRYOSHKA_COARSE_DIM = 8
     private const val BASE_LR = 0.085
     private const val TITANS_MOMENTUM_BETA = 0.72
     private const val TITANS_FORGET_DECAY = 0.012
@@ -42,6 +43,28 @@ object FrontierNeuralTrainer {
     private const val GRPO_CLIP_EPS = 0.18
     private const val GRPO_LR = 0.09
     private const val MAX_VECTORS_STORED = 1200
+
+    /**
+     * Matryoshka Representation Learning coarse prefix similarity (first 8 dimensions),
+     * capturing broad domain clusters cleanly alongside full 32D similarity.
+     */
+    fun matryoshkaCoarseSimilarity(a: FloatArray, b: FloatArray): Double {
+        var d = 0.0
+        var na = 0.0
+        var nb = 0.0
+        val n = min(MATRYOSHKA_COARSE_DIM, min(a.size, b.size))
+        for (i in 0 until n) {
+            d += a[i] * b[i]
+            na += a[i] * a[i]
+            nb += b[i] * b[i]
+        }
+        val denom = sqrt(na) * sqrt(nb)
+        return if (denom < 1e-8) 0.0 else (d / denom).coerceIn(-1.0, 1.0)
+    }
+
+    /** Computes hybrid Matryoshka Multi-Resolution Cosine (0.28 * 8D Coarse + 0.72 * 32D Fine). */
+    fun matryoshkaHybridSimilarity(a: FloatArray, b: FloatArray): Double =
+        0.28 * matryoshkaCoarseSimilarity(a, b) + 0.72 * cosineSimilarity(a, b)
 
     fun l2Normalize(vec: FloatArray): FloatArray {
         var sq = 0.0
@@ -176,7 +199,9 @@ object FrontierNeuralTrainer {
 
             var gradNormSq = 0.0
             for (d in 0 until EMBEDDING_DIM) {
-                val g = scalarGrad * gradDir[d]
+                // Matryoshka prefix dims (0..7) get 1.25x coarse cluster plasticity
+                val mScale = if (d < MATRYOSHKA_COARSE_DIM) 1.25 else 1.0
+                val g = scalarGrad * mScale * gradDir[d]
                 gradNormSq += g * g
                 val newM = (TITANS_MOMENTUM_BETA * m[d] + (1.0 - TITANS_MOMENTUM_BETA) * g).toFloat()
                 m[d] = newM
@@ -188,9 +213,18 @@ object FrontierNeuralTrainer {
             steps[target] = (steps[target] ?: 0) + 1
         }
 
-        // 2. Positive Skip-Gram + Titans Momentum + Contrastive Negative Sampling
+        // Compute in-batch concept specificity (TF-IDF-inspired Information Gain weighting)
+        val conceptDocFreq = HashMap<String, Int>()
+        for ((_, cList) in recordConceptsList) {
+            for (c in cList.distinct()) {
+                conceptDocFreq[c] = (conceptDocFreq[c] ?: 0) + 1
+            }
+        }
+        val docTotal = recordConceptsList.size.coerceAtLeast(1)
+
+        // 2. Positive Skip-Gram + Titans Momentum + Salience Weighting + Contrastive Negative Sampling
         val rngSeedBase = passIndex * 31 + 7
-        for ((idx, pair) in pairs.take(90).withIndex()) {
+        for ((idx, pair) in pairs.take(110).withIndex()) {
             val va = vecs[pair.tokenA] ?: continue
             val vb = vecs[pair.tokenB] ?: continue
 
@@ -198,8 +232,12 @@ object FrontierNeuralTrainer {
             surpriseSum += surprise
             pairUpdates++
 
+            // Salience boost for high-information concepts vs ubiquitous background tags
+            val dfAvg = ((conceptDocFreq[pair.tokenA] ?: 1) + (conceptDocFreq[pair.tokenB] ?: 1)) / 2.0
+            val idfSalience = kotlin.math.ln(1.0 + docTotal / dfAvg.coerceAtLeast(1.0)).coerceIn(0.65, 2.1)
+
             // Positive contrastive gradient pulls co-occurring concepts together
-            val posError = (1.0 - sigmoid(dot(va, vb) * 2.5)) * pair.strength.coerceAtMost(2.5)
+            val posError = (1.0 - sigmoid(dot(va, vb) * 2.5)) * pair.strength.coerceAtMost(2.5) * idfSalience
             val snapA = va.copyOf()
             val snapB = vb.copyOf()
             applyTitansStep(pair.tokenA, snapB, posError, surprise)
@@ -250,6 +288,7 @@ object FrontierNeuralTrainer {
             vecs = vecs,
             pairs = pairs,
             avgSurprise = avgSurprise,
+            passIndex = passIndex,
             nowMs = nowMs
         )
         brainDao.savePolicyState(updatedPolicy)
@@ -279,12 +318,15 @@ object FrontierNeuralTrainer {
         vecs: Map<String, FloatArray>,
         pairs: List<PairSignal>,
         avgSurprise: Double,
+        passIndex: Int,
         nowMs: Long
     ): NeuralPolicyStateEntity {
-        val multiConcept = recordsWithConcepts.filter { it.second.size >= 2 }.take(8)
-        if (multiConcept.isEmpty()) {
+        val candidates = recordsWithConcepts.filter { it.second.size >= 2 }
+        if (candidates.isEmpty()) {
             return prevPolicy.copy(avgSurprise = avgSurprise, updatedAt = nowMs)
         }
+        val offset = ((passIndex - 1).coerceAtLeast(0) * 5) % candidates.size
+        val multiConcept = (candidates.drop(offset) + candidates.take(offset)).take(10)
 
         // Build fast adjacency list for Graph hypothesis scoring
         val adj = HashMap<String, MutableList<Pair<String, Double>>>()
@@ -310,11 +352,11 @@ object FrontierNeuralTrainer {
             val graphTop = adj[anchor]?.sortedByDescending { it.second }?.take(3)?.map { it.first } ?: emptyList()
             val rGraph = if (groundTruth in graphTop) 1.0 else 0.0
 
-            // Hypothesis 2: Neural Embedding Cosine Similarity top-3 semantic prediction
+            // Hypothesis 2: Matryoshka Multi-Scale Neural Embedding top-3 semantic prediction
             val vecTop = vecs.entries
                 .asSequence()
                 .filter { it.key != anchor }
-                .map { it.key to cosineSimilarity(anchorVec, it.value) }
+                .map { it.key to matryoshkaHybridSimilarity(anchorVec, it.value) }
                 .sortedByDescending { it.second }
                 .take(3)
                 .map { it.first }
@@ -415,9 +457,27 @@ object FrontierNeuralTrainer {
         if (!foundDirect) return emptyList()
         var adapted = l2Normalize(state)
 
-        // TTT Inner-Loop SGD steps pulling slightly toward recent chat context without mutating DB weights
+        // TTT Attention-Weighted Inner Loop + SGD Adaptation over query & recent session context
         val contextVecs = recentSessionConcepts.mapNotNull { vecMap[it] }
         if (contextVecs.isNotEmpty()) {
+            // 1) Scaled Dot-Product Attention Readout across session memory keys
+            val logits = DoubleArray(contextVecs.size) { idx ->
+                cosineSimilarity(adapted, contextVecs[idx]) * 3.5
+            }
+            val maxLogit = logits.maxOrNull() ?: 0.0
+            val expScores = DoubleArray(logits.size) { i -> exp(logits[i] - maxLogit) }
+            val sumExp = expScores.sum().coerceAtLeast(1e-8)
+
+            val attnContext = FloatArray(EMBEDDING_DIM)
+            for (i in contextVecs.indices) {
+                val w = (expScores[i] / sumExp).toFloat()
+                val cv = contextVecs[i]
+                for (d in 0 until EMBEDDING_DIM) attnContext[d] += w * cv[d]
+            }
+            for (d in 0 until EMBEDDING_DIM) adapted[d] = adapted[d] * 0.78f + attnContext[d] * 0.22f
+            adapted = l2Normalize(adapted)
+
+            // 2) Ephemeral TTT gradient refinement
             val tttLr = 0.16f
             repeat(3) {
                 val grad = FloatArray(EMBEDDING_DIM)
@@ -437,7 +497,7 @@ object FrontierNeuralTrainer {
         return vecMap.entries
             .asSequence()
             .filter { it.key !in querySet }
-            .map { it.key to cosineSimilarity(adapted, it.value) }
+            .map { it.key to matryoshkaHybridSimilarity(adapted, it.value) }
             .filter { it.second > 0.22 }
             .sortedByDescending { it.second }
             .take(topK)

@@ -98,4 +98,53 @@ class OnDeviceLunaBrainTest {
         assertEquals("100\\%\\_done\\\\ok", OnDeviceLunaBrain.escapeLike("100%_done\\ok"))
         assertTrue(OnDeviceLunaBrain.tokenize("%%% ___ ???").isEmpty())
     }
+
+    @Test
+    fun upgradedMatryoshkaStdPEnsembleNgramAndMultiStepJepaWork() {
+        // 1. Morphological Tamil / English N-gram matching & Causal Next intent
+        assertTrue(OnDeviceLunaBrain.charNgramSimilarity("வாட்ஸ்அப்பில்", "வாட்ஸ்அப்") > 0.5)
+        assertTrue(OnDeviceLunaBrain.charNgramSimilarity("chatting", "chat") >= 0.3)
+        assertEquals(QueryIntent.CAUSAL_NEXT, OnDeviceLunaBrain.classifyIntent("camera apram enna"))
+
+        // 2. Matryoshka Hybrid Cosine combines 8D coarse prefix + 32D fine vectors
+        val a = FrontierNeuralTrainer.initConceptVector("camera")
+        assertTrue(FrontierNeuralTrainer.matryoshkaHybridSimilarity(a, a) > 0.99)
+
+        // 3. STDP potentiation decays exponentially with time lag
+        val closeDelta = FutureNeuralArchitectures.computeStdpPotentiation(60_000L)
+        val farDelta = FutureNeuralArchitectures.computeStdpPotentiation(25 * 60_000L)
+        assertTrue(closeDelta > farDelta)
+
+        // 4. Multi-step JEPA latent rollout produces non-empty, non-repeating trajectory
+        val c1 = FutureNeuralArchitectures.l2Normalize(FutureNeuralArchitectures.initPoincareCoords("camera"))
+        val c2 = FutureNeuralArchitectures.l2Normalize(FloatArray(FutureNeuralArchitectures.FUTURE_DIM) { i -> c1[i] * 0.85f + 0.15f })
+        val c3 = FutureNeuralArchitectures.l2Normalize(FloatArray(FutureNeuralArchitectures.FUTURE_DIM) { i -> c2[i] * 0.85f + 0.15f })
+        val cells = listOf(
+            com.personal.devicememory.core.database.entity.FutureMemoryCellEntity(
+                concept = "camera",
+                poincareCsv = FutureNeuralArchitectures.encode16(c1),
+                cmsMidCsv = FutureNeuralArchitectures.encode16(c1)
+            ),
+            com.personal.devicememory.core.database.entity.FutureMemoryCellEntity(
+                concept = "gallery",
+                poincareCsv = FutureNeuralArchitectures.encode16(c2),
+                cmsMidCsv = FutureNeuralArchitectures.encode16(c2)
+            ),
+            com.personal.devicememory.core.database.entity.FutureMemoryCellEntity(
+                concept = "whatsapp",
+                poincareCsv = FutureNeuralArchitectures.encode16(c3),
+                cmsMidCsv = FutureNeuralArchitectures.encode16(c3)
+            )
+        )
+        val idMatrix = FloatArray(FutureNeuralArchitectures.FUTURE_DIM * FutureNeuralArchitectures.FUTURE_DIM) { idx ->
+            if (idx / FutureNeuralArchitectures.FUTURE_DIM == idx % FutureNeuralArchitectures.FUTURE_DIM) 1.0f else 0.0f
+        }
+        val ws = com.personal.devicememory.core.database.entity.WorldModelStateEntity(
+            jepaMatrixCsv = idMatrix.joinToString(",")
+        )
+        val traj = FutureNeuralArchitectures.predictMultiStepTrajectory("camera", cells, ws, horizon = 2)
+        assertEquals(2, traj.size)
+        assertEquals("gallery", traj[0].first)
+        assertEquals("whatsapp", traj[1].first)
+    }
 }

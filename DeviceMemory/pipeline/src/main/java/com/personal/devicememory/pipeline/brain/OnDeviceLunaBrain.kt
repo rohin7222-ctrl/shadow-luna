@@ -2,6 +2,7 @@ package com.personal.devicememory.pipeline.brain
 
 import android.content.Context
 import com.personal.devicememory.core.common.filter.SensitiveContentFilter
+import com.personal.devicememory.core.common.text.TemporalAnchorExtractor
 import com.personal.devicememory.core.common.util.TimestampUtil
 import com.personal.devicememory.core.database.DeviceMemoryDatabase
 import com.personal.devicememory.core.database.entity.BrainInsightEntity
@@ -9,7 +10,12 @@ import com.personal.devicememory.core.database.entity.CollectedRecordEntity
 import com.personal.devicememory.core.database.entity.NeuralPolicyStateEntity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.time.Instant
+import java.time.ZoneId
 import java.util.Locale
+import kotlin.math.exp
+import kotlin.math.ln
+import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 
@@ -24,6 +30,7 @@ data class OfflineLunaReply(
     val selfPlayAccuracyPct: Int = 0,
     val jepaAccuracyPct: Int = 0,
     val curiosityTarget: String = "",
+    val causalNextChain: String = "",
     val response: String
 )
 
@@ -31,6 +38,7 @@ enum class QueryIntent {
     SUMMARY_PROFILE,
     TEMPORAL,
     SOCIAL,
+    CAUSAL_NEXT,
     CONCEPT_RECALL
 }
 
@@ -50,9 +58,25 @@ object OnDeviceLunaBrain {
     private val STOP_QUERY_WORDS = setOf(
         "what", "when", "where", "which", "who", "whom", "how", "why", "about",
         "tell", "show", "did", "does", "have", "been", "from", "with", "this",
-        "that", "you", "your", "are", "the", "and", "for", "eppo", "enna",
-        "yaar", "enga", "pati", "patti", "sollu", "kaatu", "pannen", "use"
+        "that", "you", "your", "are", "the", "and", "for", "then", "next", "after",
+        "eppo", "enna", "yaar", "enga", "pati", "patti", "sollu", "kaatu", "pannen",
+        "use", "apram", "aparam", "aduthu"
     )
+
+    fun charNgramSimilarity(a: String, b: String): Double {
+        if (a == b) return 1.0
+        if (a.length < 3 || b.length < 3) return if (a.contains(b) || b.contains(a)) 0.7 else 0.0
+        fun trigrams(s: String): Set<String> {
+            val out = HashSet<String>(s.length)
+            for (i in 0..s.length - 3) out.add(s.substring(i, i + 3))
+            return out
+        }
+        val ta = trigrams(a)
+        val tb = trigrams(b)
+        val inter = ta.count { it in tb }
+        val union = ta.size + tb.size - inter
+        return if (union <= 0) 0.0 else inter.toDouble() / union.toDouble()
+    }
 
     fun tokenize(text: String?): List<String> {
         if (text.isNullOrBlank()) return emptyList()
@@ -89,9 +113,11 @@ object OnDeviceLunaBrain {
     }
 
     fun classifyIntent(queryLower: String): QueryIntent = when {
+        listOf("next", "after", "then what", "apram", "aparam", "aduthu", "அடுத்து", "அப்புறம்")
+            .any { queryLower.contains(it) } -> QueryIntent.CAUSAL_NEXT
         listOf("summary", "pattern", "habit", "learned", "profile", "overview", "ella", "kathukitta", "theriyum")
             .any { queryLower.contains(it) } && queryLower.split(" ").size >= 2 -> QueryIntent.SUMMARY_PROFILE
-        listOf("when", "time", "eppo", "morning", "afternoon", "evening", "night")
+        listOf("when", "time", "eppo", "today", "yesterday", "tomorrow", "morning", "afternoon", "evening", "night", "இன்று", "நேற்று", "நாளை")
             .any { queryLower.contains(it) } -> QueryIntent.TEMPORAL
         listOf("who", "yaar", "message", "contact", "friend")
             .any { queryLower.contains(it) } -> QueryIntent.SOCIAL
@@ -167,11 +193,18 @@ object OnDeviceLunaBrain {
         val topInsights = brainDao.getTopInsights(12)
 
         if (intent == QueryIntent.SUMMARY_PROFILE && topInsights.isNotEmpty()) {
+            val topCausal = brainDao.getTopCausalTransitions(3)
+            val causalSummary = if (topCausal.isNotEmpty()) {
+                topCausal.joinToString(" • ") { "${it.fromConcept} → ${it.toConcept} (×${it.transitionCount})" }
+            } else ""
             val summaryBody = buildString {
                 appendLine("🧠 [Next-Gen Neural Profile • Pass #$simPasses • ${allVectors.size} vecs • GRPO $selfPlayAccPct% • JEPA $jepaAcc%]")
                 appendLine(
                     "GRPO Policy: Exact ×${fmt(policy.weightExact)}, Graph ×${fmt(policy.weightGraph)}, Vector ×${fmt(policy.weightVector)}, Temporal ×${fmt(policy.weightTemporal)}"
                 )
+                if (causalSummary.isNotBlank()) {
+                    appendLine("STDP Causal Chains: $causalSummary")
+                }
                 if (curiosity.isNotBlank()) {
                     appendLine("Active Inference Focus: exploring \"$curiosity\" next")
                 }
@@ -191,6 +224,7 @@ object OnDeviceLunaBrain {
                 selfPlayAccuracyPct = selfPlayAccPct,
                 jepaAccuracyPct = jepaAcc,
                 curiosityTarget = curiosity,
+                causalNextChain = causalSummary,
                 response = summaryBody
             )
         }
@@ -232,15 +266,26 @@ object OnDeviceLunaBrain {
             if (t.length < 4) continue
             val maxDist = if (t.length >= 6) 2 else 1
             if (vocabPool.none { it == t }) {
-                val closest = vocabPool
+                val levMatch = vocabPool
                     .asSequence()
                     .filter { kotlin.math.abs(it.length - t.length) <= maxDist }
                     .map { it to levenshteinDistance(t, it) }
                     .filter { it.second in 1..maxDist }
                     .minByOrNull { it.second }
-                if (closest != null) {
-                    expandedTerms.add(closest.first)
-                    fuzzyCorrected.add("$t → ${closest.first}")
+                if (levMatch != null) {
+                    expandedTerms.add(levMatch.first)
+                    fuzzyCorrected.add("$t → ${levMatch.first}")
+                } else {
+                    // Morphological 3-gram similarity fallback for Tamil suffixes & English inflections
+                    val ngramMatch = vocabPool
+                        .asSequence()
+                        .map { it to charNgramSimilarity(t, it) }
+                        .filter { it.second >= 0.42 }
+                        .maxByOrNull { it.second }
+                    if (ngramMatch != null) {
+                        expandedTerms.add(ngramMatch.first)
+                        fuzzyCorrected.add("$t ≈ ${ngramMatch.first}")
+                    }
                 }
             }
         }
@@ -281,46 +326,70 @@ object OnDeviceLunaBrain {
         val poincareHierarchy = if (anchorTerm != null) {
             FutureNeuralArchitectures.queryPoincareHierarchy(anchorTerm, allFutureCells, topK = 4)
         } else emptyList()
-        val jepaForecast = if (anchorTerm != null) {
-            FutureNeuralArchitectures.predictNextWorldStates(anchorTerm, allFutureCells, worldState, topK = 3)
+        val jepaTrajectory = if (anchorTerm != null) {
+            FutureNeuralArchitectures.predictMultiStepTrajectory(anchorTerm, allFutureCells, worldState, horizon = 3)
+        } else emptyList()
+        val causalNext = if (anchorTerm != null) {
+            brainDao.getNextCausalTransitions(anchorTerm, limit = 4)
         } else emptyList()
 
-        // Score candidate memories dynamically using GRPO learned policy weights!
+        // Temporal Window Filtering ("yesterday morning", "today", "நேற்று", etc.)
+        val nowMs = System.currentTimeMillis()
+        val queryWindow = TemporalAnchorExtractor.extractQueryWindow(query, nowMs)
+
+        // Score candidate memories dynamically using BM25 Specificity + Recency Decay + GRPO Learned Policy Weights!
         val scored = linkedMapOf<String, Pair<CollectedRecordEntity, Double>>()
+        fun addScore(rec: CollectedRecordEntity, delta: Double) {
+            val ageDays = max(0.0, (nowMs - rec.timestamp) / 86_400_000.0)
+            val recencyFactor = 0.78 + 0.35 * exp(-ageDays / 14.0)
+            val existing = scored[rec.id]
+            val weighted = delta * recencyFactor
+            if (existing != null) {
+                scored[rec.id] = existing.first to (existing.second + weighted)
+            } else {
+                scored[rec.id] = rec to weighted
+            }
+        }
+
         val exactScore = 10.0 * policy.weightExact
         for (rec in recordDao.searchByText(escapeLike(query), limit = 10)) {
-            scored[rec.id] = rec to exactScore
+            addScore(rec, exactScore)
         }
         for (tok in expandedTerms) {
-            val baseW = (if (tok in meaningfulTokens) 4.0 else 2.2) * policy.weightExact
-            for (rec in recordDao.searchByText(escapeLike(tok), limit = 12)) {
-                val existing = scored[rec.id]
-                val bonus = if (intent == QueryIntent.TEMPORAL) policy.weightTemporal * 0.6 else 0.0
-                if (existing != null) {
-                    scored[rec.id] = existing.first to (existing.second + baseW + bonus)
-                } else {
-                    scored[rec.id] = rec to (baseW + bonus)
-                }
+            val hits = recordDao.searchByText(escapeLike(tok), limit = 14)
+            val specificity = (1.0 + ln(1.0 + 14.0 / hits.size.coerceAtLeast(1))).coerceIn(0.8, 2.2)
+            val baseW = (if (tok in meaningfulTokens) 4.0 else 2.2) * policy.weightExact * specificity
+            val temporalBoost = if (intent == QueryIntent.TEMPORAL) policy.weightTemporal * 0.7 else 0.0
+            for (rec in hits) {
+                addScore(rec, baseW + temporalBoost)
+            }
+        }
+        if (queryWindow != null) {
+            val winRecords = recordDao.getRecordsInWindow(queryWindow.startMillis, queryWindow.endMillis, limit = 30)
+            val zone = ZoneId.systemDefault()
+            for (rec in winRecords) {
+                val hour = Instant.ofEpochMilli(rec.timestamp).atZone(zone).hour
+                val s = queryWindow.preferredHourStart
+                val e = queryWindow.preferredHourEnd
+                val todMatch = if (s != null && e != null) {
+                    if (s <= e) hour in s..e else (hour >= s || hour <= e)
+                } else true
+                val boost = (if (todMatch) 4.8 else 1.8) * policy.weightTemporal
+                addScore(rec, boost)
             }
         }
         for (hop in graphNeighbors.take(3)) {
             val hopBoost = 1.5 * policy.weightGraph
             for (rec in recordDao.searchByText(escapeLike(hop), limit = 3)) {
-                val existing = scored[rec.id]
-                if (existing != null) {
-                    scored[rec.id] = existing.first to (existing.second + hopBoost)
+                if (scored.containsKey(rec.id)) {
+                    addScore(rec, hopBoost)
                 }
             }
         }
         for ((vecConcept, sim) in tttSemanticNeighbors.take(3)) {
             val vecBoost = sim * 3.0 * policy.weightVector
             for (rec in recordDao.searchByText(escapeLike(vecConcept), limit = 4)) {
-                val existing = scored[rec.id]
-                if (existing != null) {
-                    scored[rec.id] = existing.first to (existing.second + vecBoost)
-                } else {
-                    scored[rec.id] = rec to vecBoost
-                }
+                addScore(rec, vecBoost)
             }
         }
 
@@ -342,7 +411,11 @@ object OnDeviceLunaBrain {
             emptyList()
         }
 
-        if (ranked.isEmpty() && matchedInsights.isEmpty() && matchedTokens.isEmpty() && tttSemanticNeighbors.isEmpty()) {
+        val causalChainStr = if (causalNext.isNotEmpty()) {
+            causalNext.take(3).joinToString(" → ") { "${it.toConcept} (×${it.transitionCount})" }
+        } else ""
+
+        if (ranked.isEmpty() && matchedInsights.isEmpty() && matchedTokens.isEmpty() && tttSemanticNeighbors.isEmpty() && causalNext.isEmpty()) {
             val realTopics = topInsights.take(4).joinToString(", ") { it.concept }
             return@withContext OfflineLunaReply(
                 query = query,
@@ -370,23 +443,29 @@ object OnDeviceLunaBrain {
         } else ""
 
         val response = buildString {
-            appendLine("🧠 [Titans+TTT+GRPO+JEPA+Poincaré • Pass #$simPasses • ${allVectors.size} vecs • GRPO ${selfPlayAccPct}% • JEPA ${jepaAcc}%$surpriseHint]")
+            appendLine("🧠 [Matryoshka+TTT-Attn+GRPO+JEPA+STDP • Pass #$simPasses • ${allVectors.size} vecs • GRPO ${selfPlayAccPct}% • JEPA ${jepaAcc}%$surpriseHint]")
+            if (queryWindow != null && queryWindow.label.isNotBlank()) {
+                appendLine("Temporal Window: ${queryWindow.label}")
+            }
             if (fuzzyCorrected.isNotEmpty()) {
-                appendLine("Fuzzy Match: ${fuzzyCorrected.joinToString(", ")}")
+                appendLine("Fuzzy / Stem Match: ${fuzzyCorrected.joinToString(", ")}")
             }
             if (matchedInsights.isNotEmpty()) {
                 val primary = matchedInsights.values.first()
                 appendLine("Habit (${primary.concept}): ${primary.summaryFact}")
             }
-            if (jepaForecast.isNotEmpty()) {
-                appendLine("JEPA World Forecast (Often follows): ${jepaForecast.joinToString(" → ") { it.first }}")
+            if (causalChainStr.isNotBlank()) {
+                appendLine("STDP Causal Sequence (Next likely): ${anchorTerm ?: ""} → $causalChainStr")
+            }
+            if (jepaTrajectory.isNotEmpty()) {
+                appendLine("JEPA Multi-Step Trajectory: ${jepaTrajectory.joinToString(" → ") { it.first }}")
             }
             if (poincareHierarchy.isNotEmpty()) {
                 appendLine("Poincaré Hierarchy Tree: ${poincareHierarchy.joinToString(", ") { "${it.first} (d=${fmt(it.second)})" }}")
             }
             if (tttSemanticNeighbors.isNotEmpty()) {
                 val vecText = tttSemanticNeighbors.take(4).joinToString(", ") { "${it.first} (${fmt(it.second)})" }
-                appendLine("TTT Semantic Neighbors: $vecText")
+                appendLine("TTT-Attention Semantic Neighbors: $vecText")
             }
             if (graphNeighbors.isNotEmpty()) {
                 appendLine("Graph Links: ${graphNeighbors.take(4).joinToString(" ↔ ")}")
@@ -415,6 +494,7 @@ object OnDeviceLunaBrain {
             selfPlayAccuracyPct = selfPlayAccPct,
             jepaAccuracyPct = jepaAcc,
             curiosityTarget = curiosity,
+            causalNextChain = causalChainStr,
             response = response
         )
     }

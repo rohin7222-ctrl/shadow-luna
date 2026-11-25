@@ -269,12 +269,17 @@ class LunaServerController:
                 nodes = [dict(r) for r in c.execute("SELECT * FROM graph_nodes ORDER BY mention_count DESC LIMIT 30").fetchall()]
                 tokens = []
                 sessions = []
+                transitions = []
                 try:
                     tokens = [dict(r) for r in c.execute("SELECT * FROM learned_tokens ORDER BY frequency DESC, last_seen DESC LIMIT 150").fetchall()]
                 except Exception:
                     pass
                 try:
                     sessions = [dict(r) for r in c.execute("SELECT * FROM sync_sessions ORDER BY synced_at DESC LIMIT 10").fetchall()]
+                except Exception:
+                    pass
+                try:
+                    transitions = [dict(r) for r in c.execute("SELECT * FROM learned_transitions ORDER BY weight DESC, transition_count DESC LIMIT 20").fetchall()]
                 except Exception:
                     pass
             db_bytes = os.path.getsize(DB_PATH)
@@ -289,6 +294,7 @@ class LunaServerController:
                 "nodes": nodes,
                 "tokens": tokens,
                 "sessions": sessions,
+                "transitions": transitions,
                 "updates": updates,
             }
         except Exception as e:
@@ -341,7 +347,7 @@ class LunaServerController:
                 pass
         if os.path.exists(DB_PATH):
             with closing(sqlite3.connect(DB_PATH, timeout=15.0)) as conn:
-                for tbl in ("memories", "graph_nodes", "graph_edges", "user_state", "learned_tokens", "sync_sessions"):
+                for tbl in ("memories", "graph_nodes", "graph_edges", "user_state", "learned_tokens", "sync_sessions", "learned_transitions"):
                     try:
                         conn.execute(f"DELETE FROM {tbl}")
                     except Exception:

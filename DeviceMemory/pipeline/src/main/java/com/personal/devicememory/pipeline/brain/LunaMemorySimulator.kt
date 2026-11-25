@@ -3,6 +3,7 @@ package com.personal.devicememory.pipeline.brain
 import android.content.Context
 import android.util.Log
 import com.personal.devicememory.core.common.filter.SensitiveContentFilter
+import com.personal.devicememory.core.common.text.TemporalAnchorExtractor
 import com.personal.devicememory.core.database.DeviceMemoryDatabase
 import com.personal.devicememory.core.database.entity.BrainInsightEntity
 import com.personal.devicememory.core.database.entity.CollectedRecordEntity
@@ -37,6 +38,8 @@ data class SimulationSnapshot(
     val jepaAccuracyPct: Int = 0,
     val avgFreeEnergy: Double = 0.0,
     val curiosityTarget: String = "",
+    val causalTransitionsCount: Int = 0,
+    val topCausalChain: String = "",
     val topSimulatedConcepts: List<String> = emptyList()
 )
 
@@ -121,6 +124,8 @@ object LunaMemorySimulator {
         val acc = if (policy != null && policy.selfPlayTotal > 0) {
             ((policy.selfPlayCorrect.toDouble() / policy.selfPlayTotal) * 100.0).toInt().coerceIn(0, 100)
         } else 0
+        val topCausal = brainDao.getTopCausalTransitions(1).firstOrNull()
+        val causalChain = topCausal?.let { "${it.fromConcept} → ${it.toConcept}" } ?: ""
         val snap = SimulationSnapshot(
             isSimulating = running,
             totalPasses = stats?.totalPasses ?: 0,
@@ -134,6 +139,8 @@ object LunaMemorySimulator {
             jepaAccuracyPct = world?.jepaAccuracyPct ?: 0,
             avgFreeEnergy = world?.avgFreeEnergy ?: 0.0,
             curiosityTarget = world?.curiosityTarget ?: "",
+            causalTransitionsCount = brainDao.countCausalTransitions(),
+            topCausalChain = causalChain,
             topSimulatedConcepts = top
         )
         _snapshot.value = snap
@@ -240,9 +247,14 @@ object LunaMemorySimulator {
         val pairAccums = HashMap<String, PairAccum>()
         val conceptAccums = HashMap<String, ConceptAccum>()
 
-        // Precompute clean concepts + time buckets per record in batch
+        // Precompute clean concepts + resolved TemporalAnchor time buckets per record in batch
         val prepared: List<Triple<CollectedRecordEntity, List<String>, String>> = batch.map { rec ->
-            Triple(rec, extractSemanticConcepts(rec.sourceType, rec.textContent), timeBucketLabel(rec.timestamp))
+            val rawText = rec.textContent
+            val anchorTs = if (!rawText.isNullOrBlank()) {
+                TemporalAnchorExtractor.extractAnchors(rawText, rec.timestamp)
+                    .maxByOrNull { it.confidence }?.estimatedEpochMillis ?: rec.timestamp
+            } else rec.timestamp
+            Triple(rec, extractSemanticConcepts(rec.sourceType, rawText), timeBucketLabel(anchorTs))
         }
 
         fun addPair(aRaw: String, bRaw: String, delta: Double, src: String, bucket: String, ts: Long) {
@@ -403,6 +415,10 @@ object LunaMemorySimulator {
         val totalVecs = brainDao.countVectors()
         val topConceptsDisplay = brainDao.getTopInsights(5).map { it.concept }
 
+        val topCausal = brainDao.getTopCausalTransitions(1).firstOrNull()
+        val topChain = topCausal?.let { "${it.fromConcept} → ${it.toConcept}" } ?: ""
+        val causalCount = brainDao.countCausalTransitions()
+
         brainDao.saveStats(
             SimulationStatsEntity(
                 id = 1,
@@ -427,6 +443,8 @@ object LunaMemorySimulator {
             jepaAccuracyPct = futureMetrics.jepaAccuracyPct,
             avgFreeEnergy = futureMetrics.avgFreeEnergy,
             curiosityTarget = futureMetrics.curiosityTarget,
+            causalTransitionsCount = causalCount,
+            topCausalChain = topChain,
             topSimulatedConcepts = topConceptsDisplay
         )
     }

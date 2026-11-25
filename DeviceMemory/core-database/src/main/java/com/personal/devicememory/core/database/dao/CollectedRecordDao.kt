@@ -37,6 +37,9 @@ interface CollectedRecordDao {
     @Query("SELECT * FROM collected_records WHERE text_content LIKE '%' || :term || '%' ESCAPE '\\' ORDER BY timestamp DESC LIMIT :limit")
     suspend fun searchByText(term: String, limit: Int = 10): List<CollectedRecordEntity>
 
+    @Query("SELECT * FROM collected_records WHERE timestamp BETWEEN :startMs AND :endMs ORDER BY timestamp DESC LIMIT :limit")
+    suspend fun getRecordsInWindow(startMs: Long, endMs: Long, limit: Int = 25): List<CollectedRecordEntity>
+
     @Query("SELECT * FROM collected_records ORDER BY timestamp DESC LIMIT :limit")
     suspend fun getRecentAll(limit: Int = 15): List<CollectedRecordEntity>
 

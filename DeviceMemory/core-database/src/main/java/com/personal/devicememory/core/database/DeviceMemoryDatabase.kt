@@ -14,6 +14,7 @@ import com.personal.devicememory.core.database.dao.CollectorConfigDao
 import com.personal.devicememory.core.database.dao.LearnedTokenDao
 import com.personal.devicememory.core.database.dao.SyncBookmarkDao
 import com.personal.devicememory.core.database.entity.BrainInsightEntity
+import com.personal.devicememory.core.database.entity.CausalTransitionEntity
 import com.personal.devicememory.core.database.entity.CollectedRecordEntity
 import com.personal.devicememory.core.database.entity.CollectorConfigEntity
 import com.personal.devicememory.core.database.entity.FutureMemoryCellEntity
@@ -38,9 +39,10 @@ import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
         NeuralVectorEntity::class,
         NeuralPolicyStateEntity::class,
         FutureMemoryCellEntity::class,
-        WorldModelStateEntity::class
+        WorldModelStateEntity::class,
+        CausalTransitionEntity::class
     ],
-    version = 5,
+    version = 6,
     exportSchema = false
 )
 abstract class DeviceMemoryDatabase : RoomDatabase() {
@@ -194,6 +196,27 @@ abstract class DeviceMemoryDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `causal_transitions` (
+                        `transition_key` TEXT NOT NULL,
+                        `from_concept` TEXT NOT NULL,
+                        `to_concept` TEXT NOT NULL,
+                        `stdp_weight` REAL NOT NULL,
+                        `transition_count` INTEGER NOT NULL,
+                        `avg_delta_ms` INTEGER NOT NULL,
+                        `last_seen_ms` INTEGER NOT NULL,
+                        PRIMARY KEY(`transition_key`)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_causal_transitions_from_concept` ON `causal_transitions` (`from_concept`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_causal_transitions_stdp_weight` ON `causal_transitions` (`stdp_weight`)")
+            }
+        }
+
         init {
             try {
                 System.loadLibrary("sqlcipher")
@@ -234,7 +257,7 @@ abstract class DeviceMemoryDatabase : RoomDatabase() {
                 DB_NAME
             )
                 .openHelperFactory(factory)
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
                 .fallbackToDestructiveMigration()
                 .build()
         }
