@@ -917,8 +917,12 @@
                         <span class="lan-chip" id="hs-lan-chip">Checking Wi-Fi...</span>
                         <div class="fw-warn-box" id="fw-warning-box">
                             <span id="fw-warn-text">Windows Firewall is blocking phone connections on Wi-Fi. Allow access once so your phone can sync.</span>
-                            <button type="button" class="btn-warn" onclick="allowFirewall()">Allow Mobile Sync (Firewall)</button>
+                            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                                <button type="button" class="btn-warn" onclick="allowFirewall()">Allow Mobile Sync (Firewall)</button>
+                                <button type="button" class="btn-soft" style="padding:7px 12px;font-size:0.8rem;" onclick="enableUsbBridge()">Connect via USB Cable</button>
+                            </div>
                             <span id="fw-action-status" style="font-size:0.78rem;color:var(--cyan);display:none;"></span>
+                            <span style="font-size:0.76rem;color:var(--text-muted);line-height:1.35;">Tip: If your Wi-Fi router blocks phone↔laptop (AP Isolation), turn on Phone Hotspot for Laptop or plug in a USB cable.</span>
                         </div>
                         <p id="hs-desc" style="font-size:0.92rem;color:var(--text-muted);">
                             Your phone works 100% offline. Click Connect below when you want to download learning progress onto this laptop.
@@ -1144,18 +1148,27 @@
             const statusEl = document.getElementById('settings-status');
             const fwStatus = document.getElementById('fw-action-status');
             if (statusEl) statusEl.textContent = 'Opening Windows Firewall prompt...';
-            if (fwStatus) { fwStatus.style.display = 'block'; fwStatus.textContent = 'Opening Windows Firewall prompt...'; }
+            if (fwStatus) { fwStatus.style.display = 'block'; fwStatus.textContent = 'Approve the Windows admin prompt (Yes)...'; }
             try {
                 const res = await apiCall('/ctl/firewall', 'POST', {});
-                const msg = res.ok === false
-                    ? (res.error || 'Failed to trigger firewall prompt.')
-                    : (res.message || 'Approve the Windows admin prompt, then wait 2s.');
+                const msg = res.message || (res.ok ? 'Firewall Allowed ✓' : 'Failed to allow firewall.');
                 if (statusEl) statusEl.textContent = msg;
                 if (fwStatus) fwStatus.textContent = msg;
-                setTimeout(pollAll, 2000);
+                await pollAll();
             } catch (e) {
                 if (statusEl) statusEl.textContent = 'Failed to trigger firewall prompt.';
                 if (fwStatus) { fwStatus.style.display = 'block'; fwStatus.textContent = 'Failed to trigger firewall prompt.'; }
+            }
+        }
+
+        async function enableUsbBridge() {
+            const fwStatus = document.getElementById('fw-action-status');
+            if (fwStatus) { fwStatus.style.display = 'block'; fwStatus.textContent = 'Linking USB ADB tunnel...'; }
+            try {
+                const res = await apiCall('/ctl/adb-bridge', 'POST', {});
+                if (fwStatus) fwStatus.textContent = res.message || 'Check USB debugging on phone.';
+            } catch (e) {
+                if (fwStatus) fwStatus.textContent = 'USB bridge failed.';
             }
         }
 

@@ -121,12 +121,16 @@ object LunaSyncManager {
 
     fun openLocalConnection(context: Context, endpointUrl: String): HttpURLConnection {
         val url = URL(endpointUrl)
-        val wifiNet = findWifiNetwork(context)
-        if (wifiNet != null) {
-            try {
-                return wifiNet.openConnection(url) as HttpURLConnection
-            } catch (_: Throwable) {
-                // Fall back to default OS routing (e.g. Hotspot AP interface)
+        val host = url.host?.lowercase() ?: ""
+        // Never bind loopback / USB ADB reverse traffic through Wi-Fi transport
+        if (host != "127.0.0.1" && host != "localhost" && host != "::1") {
+            val wifiNet = findWifiNetwork(context)
+            if (wifiNet != null) {
+                try {
+                    return wifiNet.openConnection(url) as HttpURLConnection
+                } catch (_: Throwable) {
+                    // Fall back to default OS routing (e.g. Hotspot AP interface)
+                }
             }
         }
         return url.openConnection() as HttpURLConnection
@@ -191,6 +195,12 @@ object LunaSyncManager {
             return@withContext current
         }
 
+        // Fast-check USB ADB reverse loopback (bypasses router AP isolation completely)
+        if (current != "http://127.0.0.1:8000" && pingServer(context, "http://127.0.0.1:8000", 250)) {
+            LunaServerConfig.setServerUrl(context, "http://127.0.0.1:8000")
+            return@withContext "http://127.0.0.1:8000"
+        }
+
         val ipsAndPrefixes = getLocalLanIpsAndPrefixes()
         val ownIps = ipsAndPrefixes.map { it.first }.toSet()
         val prefixes = ipsAndPrefixes.map { it.second }.distinct()
@@ -244,7 +254,7 @@ object LunaSyncManager {
                             sem.withPermit {
                                 if (found.isCompleted) return@withPermit
                                 val candidate = "http://$ip:8000"
-                                if (pingServer(context, candidate, 450)) {
+                                if (pingServer(context, candidate, 650)) {
                                     found.complete(candidate)
                                 }
                             }
@@ -286,7 +296,7 @@ object LunaSyncManager {
         val phoneNetHint = if (ips.isEmpty()) {
             "Phone is not connected to Wi-Fi or Hotspot."
         } else {
-            "Phone Wi-Fi IP: ${ips.joinToString(", ")}. Laptop not responding at $serverUrl — open Shadow Desktop → Mobile Sync → Allow Mobile Sync (Firewall)."
+            "Phone Wi-Fi IP: ${ips.joinToString(", ")}. Laptop blocked or isolated at $serverUrl — approve Firewall on Laptop, or use Mobile Hotspot / USB cable if your router has AP Isolation."
         }
         HandshakeProbeResult(null, serverUrl, phoneNetHint)
     }

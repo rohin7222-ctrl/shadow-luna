@@ -1,4 +1,4 @@
-package com.personal.devicememory.core.common.text
+ package com.personal.devicememory.core.common.text
 
 import java.time.Instant
 import java.time.LocalDate

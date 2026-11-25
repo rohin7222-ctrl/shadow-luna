@@ -1,3 +1,4 @@
+import base64
 import ctypes
 import json
 import os
@@ -533,19 +534,57 @@ def start_control_http_server(ctrl: LunaServerController):
                 ctrl.reset_brain()
                 self._send_json(200, {"ok": True})
             elif path_only == "/ctl/firewall":
-                ps_inner = (
-                    "netsh advfirewall firewall delete rule name='Shadow Luna Server 8000' 2>$null; "
-                    "netsh advfirewall firewall add rule name='Shadow Luna Server 8000' dir=in action=allow protocol=TCP localport=8000 profile=any; "
-                    "netsh advfirewall firewall delete rule name='Shadow Luna Discovery 8800' 2>$null; "
-                    "netsh advfirewall firewall add rule name='Shadow Luna Discovery 8800' dir=in action=allow protocol=UDP localport=8800 profile=any"
-                )
-                cmd = f'Start-Process powershell -Verb RunAs -Wait -ArgumentList "-NoProfile","-Command","{ps_inner}"'
+                py_exes = list(dict.fromkeys([PYTHON_EXE, sys.executable]))
+                exe_cmds = []
+                for idx, p_exe in enumerate(py_exes):
+                    if p_exe and os.path.exists(p_exe):
+                        rname = f"Shadow Luna Python {idx}"
+                        exe_cmds.append(
+                            f'netsh advfirewall firewall delete rule name="{rname}" *> $null; '
+                            f'netsh advfirewall firewall add rule name="{rname}" dir=in action=allow program="{p_exe}" enable=yes profile=any'
+                        )
+                ps_script = "\n".join([
+                    'netsh advfirewall firewall delete rule name="Shadow Luna Server 8000" *> $null',
+                    'netsh advfirewall firewall add rule name="Shadow Luna Server 8000" dir=in action=allow protocol=TCP localport=8000 enable=yes profile=any',
+                    'netsh advfirewall firewall delete rule name="Shadow Luna Discovery 8800" *> $null',
+                    'netsh advfirewall firewall add rule name="Shadow Luna Discovery 8800" dir=in action=allow protocol=UDP localport=8800 enable=yes profile=any',
+                    *exe_cmds,
+                ])
+                encoded = base64.b64encode(ps_script.encode("utf-16-le")).decode("ascii")
+                uac_cmd = f"Start-Process powershell -Verb RunAs -Wait -ArgumentList '-NoProfile','-EncodedCommand','{encoded}'"
                 try:
-                    subprocess.Popen(["powershell", "-NoProfile", "-Command", cmd])
-                    _fw_cache["checked_at"] = 0.0
-                    self._send_json(200, {"ok": True, "message": "Approve the Windows admin prompt to allow mobile sync."})
+                    no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+                    proc_fw = subprocess.run(
+                        ["powershell", "-NoProfile", "-Command", uac_cmd],
+                        capture_output=True, text=True, timeout=30, creationflags=no_window
+                    )
+                    fw = check_firewall_status(force=True)
+                    if fw.get("rule_exists"):
+                        self._send_json(200, {"ok": True, "firewall": fw, "message": "Firewall allowed on ports 8000 & 8800!"})
+                    else:
+                        self._send_json(200, {
+                            "ok": False,
+                            "firewall": fw,
+                            "message": f"Admin prompt cancelled or blocked (code {proc_fw.returncode}). Click Allow & approve Yes."
+                        })
                 except Exception as e:
                     self._send_json(500, {"ok": False, "error": str(e)})
+            elif path_only == "/ctl/adb-bridge":
+                adb_exe = r"C:\Users\acer\AppData\Local\Android\Sdk\platform-tools\adb.exe"
+                if not os.path.exists(adb_exe):
+                    adb_exe = "adb"
+                try:
+                    no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+                    r = subprocess.run(
+                        [adb_exe, "reverse", f"tcp:{SERVER_PORT}", f"tcp:{SERVER_PORT}"],
+                        capture_output=True, text=True, timeout=4, creationflags=no_window
+                    )
+                    if r.returncode == 0:
+                        self._send_json(200, {"ok": True, "message": "USB Cable Bridge Ready! On phone, tap Update URL -> http://127.0.0.1:8000"})
+                    else:
+                        self._send_json(200, {"ok": False, "message": (r.stderr or r.stdout or "No USB debugging phone detected.").strip()})
+                except Exception as e:
+                    self._send_json(200, {"ok": False, "message": f"ADB unavailable: {e}"})
             elif path_only == "/ctl/focus":
                 ctrl.focus_window()
                 self._send_json(200, {"ok": True})
