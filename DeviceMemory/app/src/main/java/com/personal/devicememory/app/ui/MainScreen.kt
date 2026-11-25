@@ -828,17 +828,48 @@ private fun ConnectToServerDialog(
                             )
                         }
                         Text(
-                            "Waiting for Laptop...",
+                            if (handshake.laptopConnected) "Waiting for Laptop..." else "Searching Wi-Fi...",
                             style = MaterialTheme.typography.titleLarge,
                             fontWeight = FontWeight.Bold,
                             color = TextPrimary
                         )
+                        Surface(
+                            shape = RoundedCornerShape(999.dp),
+                            color = (if (handshake.laptopConnected) MintSuccess else Color(0xFFF59E0B)).copy(alpha = 0.14f),
+                            border = BorderStroke(
+                                0.8.dp,
+                                (if (handshake.laptopConnected) MintSuccess else Color(0xFFF59E0B)).copy(alpha = 0.40f)
+                            )
+                        ) {
+                            Text(
+                                text = if (handshake.laptopConnected) "Laptop Reached ✓" else "Searching / Firewall Check",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.SemiBold,
+                                color = if (handshake.laptopConnected) MintSuccess else Color(0xFFFBBF24),
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                            )
+                        }
                         Text(
                             handshake.statusText,
                             style = MaterialTheme.typography.bodySmall,
                             color = TextMuted,
                             textAlign = TextAlign.Center
                         )
+                        if (handshake.diagnosticError != null) {
+                            Surface(
+                                shape = RoundedCornerShape(14.dp),
+                                color = Color(0xFFF59E0B).copy(alpha = 0.10f),
+                                border = BorderStroke(0.8.dp, Color(0xFFF59E0B).copy(alpha = 0.35f)),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text(
+                                    text = handshake.diagnosticError,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color(0xFFFDE68A),
+                                    modifier = Modifier.padding(12.dp)
+                                )
+                            }
+                        }
                         OutlinedTextField(
                             value = urlInput,
                             onValueChange = { urlInput = it },

@@ -9,7 +9,6 @@ import java.io.BufferedReader
 import java.io.File
 import java.io.InputStreamReader
 import java.net.HttpURLConnection
-import java.net.URL
 
 @Serializable
 data class LunaUpdateItemDto(
@@ -39,22 +38,28 @@ data class LunaServerStateDto(
 
 /**
  * Fetches server-published updates, downloads OTA bundles, checks Luna learned count,
- * and triggers server brain reset when requested.
+ * and triggers server brain reset when requested — bound cleanly over active Wi-Fi.
  */
 object LunaUpdatesClient {
 
     private val json = Json { ignoreUnknownKeys = true }
 
+    private suspend fun resolveUrl(context: Context): String {
+        val saved = LunaServerConfig.getServerUrl(context)
+        if (LunaSyncManager.pingServer(context, saved, 800)) return saved
+        return LunaSyncManager.discoverServerOnLan(context) ?: saved
+    }
+
     suspend fun fetchUpdates(context: Context, installedVersion: String): Result<LunaUpdatesResponseDto> =
         withContext(Dispatchers.IO) {
-            val serverUrl = LunaServerConfig.getServerUrl(context)
+            val serverUrl = resolveUrl(context)
             if (!LunaServerConfig.isLocalPrivateUrl(serverUrl)) {
                 return@withContext Result.failure(IllegalStateException("Non-local server blocked"))
             }
             var conn: HttpURLConnection? = null
             try {
                 val url = "$serverUrl/api/updates?installed_version=${java.net.URLEncoder.encode(installedVersion, "UTF-8")}"
-                conn = (URL(url).openConnection() as HttpURLConnection).apply {
+                conn = LunaSyncManager.openLocalConnection(context, url).apply {
                     requestMethod = "GET"
                     connectTimeout = 3000
                     readTimeout = 5000
@@ -81,7 +86,7 @@ object LunaUpdatesClient {
             var conn: HttpURLConnection? = null
             try {
                 val url = "$serverUrl/api/updates/bundle/${java.net.URLEncoder.encode(version, "UTF-8")}"
-                conn = (URL(url).openConnection() as HttpURLConnection).apply {
+                conn = LunaSyncManager.openLocalConnection(context, url).apply {
                     requestMethod = "GET"
                     connectTimeout = 4000
                     readTimeout = 8000
@@ -107,7 +112,7 @@ object LunaUpdatesClient {
         if (!LunaServerConfig.isLocalPrivateUrl(serverUrl)) return@withContext null
         var conn: HttpURLConnection? = null
         try {
-            conn = (URL("$serverUrl/api/state").openConnection() as HttpURLConnection).apply {
+            conn = LunaSyncManager.openLocalConnection(context, "$serverUrl/api/state").apply {
                 requestMethod = "GET"
                 connectTimeout = 2500
                 readTimeout = 3000
@@ -130,7 +135,7 @@ object LunaUpdatesClient {
         }
         var conn: HttpURLConnection? = null
         try {
-            conn = (URL("$serverUrl/api/reset-brain").openConnection() as HttpURLConnection).apply {
+            conn = LunaSyncManager.openLocalConnection(context, "$serverUrl/api/reset-brain").apply {
                 requestMethod = "POST"
                 connectTimeout = 3000
                 readTimeout = 5000

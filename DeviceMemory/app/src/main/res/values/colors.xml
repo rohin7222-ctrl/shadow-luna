@@ -1,8 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!-- Shadow & Luna 2026 Spatial Obsidian Glass Palette -->
-    <color name="ic_launcher_background">#06050B</color>
-    <color name="ic_launcher_foreground">#38BDF8</color>
+    <color name="ic_launcher_background">#0C0D1A</color>
     <color name="luna_violet">#7C3AED</color>
     <color name="luna_cyan">#38BDF8</color>
     <color name="shadow_dark">#06050B</color>

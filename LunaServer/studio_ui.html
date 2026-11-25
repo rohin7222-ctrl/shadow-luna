@@ -649,6 +649,46 @@
             transition: width 0.25s ease;
         }
 
+        .lan-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 5px 12px;
+            border-radius: 999px;
+            background: rgba(56, 189, 248, 0.10);
+            border: 1px solid rgba(56, 189, 248, 0.28);
+            color: var(--cyan);
+            font-size: 0.78rem;
+            font-weight: 600;
+            user-select: text;
+        }
+
+        .fw-warn-box {
+            width: 100%;
+            padding: 14px 16px;
+            border-radius: 16px;
+            background: rgba(245, 158, 11, 0.10);
+            border: 1px solid rgba(245, 158, 11, 0.38);
+            color: #fde68a;
+            font-size: 0.84rem;
+            text-align: left;
+            display: none;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .btn-warn {
+            align-self: flex-start;
+            background: linear-gradient(135deg, #f59e0b, #ea580c);
+            color: #fff;
+            border: none;
+            border-radius: 10px;
+            padding: 8px 14px;
+            font-size: 0.82rem;
+            font-weight: 600;
+            cursor: pointer;
+        }
+
         .btn-soft {
             background: var(--bg-elevated);
             border: 1px solid var(--border);
@@ -866,6 +906,11 @@
                             <img src="/studio/logo.png" alt="" style="width:68px;height:68px;border-radius:18px;z-index:1;">
                         </div>
                         <h2 id="hs-title">Connect Shadow Mobile</h2>
+                        <span class="lan-chip" id="hs-lan-chip">Checking Wi-Fi...</span>
+                        <div class="fw-warn-box" id="fw-warning-box">
+                            <span id="fw-warn-text">Windows Firewall is blocking phone connections on Wi-Fi. Allow access once so your phone can sync.</span>
+                            <button type="button" class="btn-warn" onclick="allowFirewall()">Allow Mobile Sync (Firewall)</button>
+                        </div>
                         <p id="hs-desc" style="font-size:0.92rem;color:var(--text-muted);">
                             Your phone works 100% offline. Click Connect below when you want to download learning progress onto this laptop.
                         </p>
@@ -1147,6 +1192,24 @@
                 document.getElementById('stat-ent').textContent = latestSnapshot.nodes_count || 0;
                 document.getElementById('nav-tok-badge').textContent = latestSnapshot.tokens_count || 0;
                 document.getElementById('phone-url-display').value = st.lan_url || '';
+
+                const lanChip = document.getElementById('hs-lan-chip');
+                if (lanChip) {
+                    const ips = (st.all_ips && st.all_ips.length) ? st.all_ips : [st.lan_url || ''];
+                    lanChip.textContent = 'Wi-Fi: ' + ips.map(i => i.startsWith('http') ? i : `http://${i}:8000`).join('  •  ');
+                }
+                const fwBox = document.getElementById('fw-warning-box');
+                const fwText = document.getElementById('fw-warn-text');
+                if (fwBox && st.firewall) {
+                    if (st.firewall.blocked_likely) {
+                        fwBox.style.display = 'flex';
+                        if (fwText) {
+                            fwText.textContent = `Windows Firewall (${st.firewall.wifi_profile} Wi-Fi) is blocking incoming phone connections on port 8000. Click below once to allow.`;
+                        }
+                    } else {
+                        fwBox.style.display = 'none';
+                    }
+                }
 
                 const heroSub = document.getElementById('hero-sub');
                 if (heroSub) {

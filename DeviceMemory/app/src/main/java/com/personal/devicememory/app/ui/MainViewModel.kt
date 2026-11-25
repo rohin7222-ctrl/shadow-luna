@@ -44,7 +44,9 @@ data class HandshakeUiState(
     val statusText: String = "",
     val uploadedRecords: Int = 0,
     val totalRecords: Int = 0,
-    val uploadedTokens: Int = 0
+    val uploadedTokens: Int = 0,
+    val laptopConnected: Boolean = false,
+    val diagnosticError: String? = null
 )
 
 data class OfflineChatMessage(
@@ -165,15 +167,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             it.copy(
                 handshake = HandshakeUiState(
                     phase = HandshakePhase.WAITING_FOR_LAPTOP,
-                    statusText = "Waiting for Laptop... Click 'Connect to App' on Luna Studio."
+                    statusText = "Searching for Laptop on Wi-Fi...",
+                    laptopConnected = false,
+                    diagnosticError = null
                 )
             )
         }
 
         handshakeJob = viewModelScope.launch {
             while (isActive) {
-                val sig = LunaSyncManager.signalMobileReady(app)
-                val statusDto = sig.getOrNull()
+                val probe = LunaSyncManager.discoverAndSignalMobileReady(app)
+                val statusDto = probe.status
+                if (probe.resolvedUrl.isNotBlank() && probe.resolvedUrl != _uiState.value.serverUrl) {
+                    _uiState.update { it.copy(serverUrl = probe.resolvedUrl) }
+                }
+
                 if (statusDto != null && statusDto.phase == "TRANSFERRING") {
                     break
                 }
@@ -182,23 +190,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         it.copy(
                             handshake = it.handshake.copy(
                                 phase = HandshakePhase.WAITING_FOR_LAPTOP,
-                                statusText = statusDto.last_message.ifBlank {
-                                    "Waiting for Laptop... Click 'Connect to App' on Luna Studio."
-                                }
+                                laptopConnected = true,
+                                diagnosticError = null,
+                                statusText = "Connected to Laptop • Now click 'Connect to App' on Shadow Desktop."
                             )
                         )
                     }
+                    delay(1000L)
                 } else {
                     _uiState.update {
                         it.copy(
                             handshake = it.handshake.copy(
                                 phase = HandshakePhase.WAITING_FOR_LAPTOP,
-                                statusText = "Waiting for Laptop (${LunaServerConfig.getServerUrl(app)})... Click 'Connect to App' on Laptop."
+                                laptopConnected = false,
+                                diagnosticError = probe.diagnosticError,
+                                statusText = "Cannot reach Laptop on Wi-Fi"
                             )
                         )
                     }
+                    delay(2000L)
                 }
-                delay(1000L)
             }
 
             if (!isActive) return@launch

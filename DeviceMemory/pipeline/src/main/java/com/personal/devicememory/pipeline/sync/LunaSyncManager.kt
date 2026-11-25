@@ -1,10 +1,19 @@
 package com.personal.devicememory.pipeline.sync
 
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
 import android.util.Log
 import com.personal.devicememory.core.common.filter.SensitiveContentFilter
 import com.personal.devicememory.core.database.DeviceMemoryDatabase
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
@@ -12,8 +21,14 @@ import kotlinx.serialization.json.Json
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
+import java.net.DatagramPacket
+import java.net.DatagramSocket
 import java.net.HttpURLConnection
+import java.net.Inet4Address
+import java.net.InetAddress
+import java.net.NetworkInterface
 import java.net.URL
+import java.util.Collections
 
 @Serializable
 data class LunaSyncRecordDto(
@@ -34,7 +49,7 @@ data class LunaTokenDto(
 
 @Serializable
 data class LunaSyncPayloadDto(
-    val client_version: String = "Shadow-0.3.0",
+    val client_version: String = "Shadow-0.3.1",
     val records: List<LunaSyncRecordDto>,
     val tokens: List<LunaTokenDto> = emptyList()
 )
@@ -65,6 +80,12 @@ data class HandshakeProgressDto(
     val received_tokens: Int
 )
 
+data class HandshakeProbeResult(
+    val status: HandshakeStatusDto?,
+    val resolvedUrl: String,
+    val diagnosticError: String? = null
+)
+
 data class SyncResult(
     val success: Boolean,
     val syncedCount: Int,
@@ -75,13 +96,196 @@ data class SyncResult(
 
 /**
  * Handles explicit 2-way Handshake transfer from Mobile Shadow Vault -> Laptop Luna Server Studio.
- * Zero background/automatic uploads occur outside explicit user handshake.
+ * Binds local LAN traffic to active Wi-Fi transport so 5G/cellular data never hijacks LAN IPs,
+ * and auto-discovers the Laptop on the same Wi-Fi subnet or hotspot if DHCP IP changed.
  */
 object LunaSyncManager {
 
     private const val TAG = "LunaSyncManager"
     private const val BATCH_SIZE = 50
+    private const val DISCOVERY_UDP_PORT = 8800
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
+
+    @Suppress("DEPRECATION")
+    private fun findWifiNetwork(context: Context): Network? {
+        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return null
+        val active = cm.activeNetwork
+        if (active != null && cm.getNetworkCapabilities(active)?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true) {
+            return active
+        }
+        return cm.allNetworks.firstOrNull { net ->
+            cm.getNetworkCapabilities(net)?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
+        }
+    }
+
+    fun openLocalConnection(context: Context, endpointUrl: String): HttpURLConnection {
+        val url = URL(endpointUrl)
+        val wifiNet = findWifiNetwork(context)
+        if (wifiNet != null) {
+            try {
+                return wifiNet.openConnection(url) as HttpURLConnection
+            } catch (_: Throwable) {
+                // Fall back to default OS routing (e.g. Hotspot AP interface)
+            }
+        }
+        return url.openConnection() as HttpURLConnection
+    }
+
+    private fun getLocalLanIpsAndPrefixes(): List<Pair<String, String>> {
+        val result = ArrayList<Pair<String, String>>()
+        try {
+            val ifaces = NetworkInterface.getNetworkInterfaces() ?: return emptyList()
+            for (iface in Collections.list(ifaces)) {
+                if (!iface.isUp || iface.isLoopback) continue
+                for (addr in Collections.list(iface.inetAddresses)) {
+                    if (addr is Inet4Address && !addr.isLoopbackAddress) {
+                        val ip = addr.hostAddress ?: continue
+                        val parts = ip.split(".")
+                        if (parts.size == 4) {
+                            val a = parts[0].toIntOrNull() ?: continue
+                            val b = parts[1].toIntOrNull() ?: continue
+                            if (a == 10 || (a == 192 && b == 168) || (a == 172 && b in 16..31)) {
+                                val prefix = "${parts[0]}.${parts[1]}.${parts[2]}"
+                                result.add(ip to prefix)
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (_: Throwable) {}
+        return result
+    }
+
+    fun pingServer(context: Context, baseUrl: String, timeoutMs: Int = 900): Boolean {
+        if (!LunaServerConfig.isLocalPrivateUrl(baseUrl)) return false
+        var conn: HttpURLConnection? = null
+        return try {
+            conn = openLocalConnection(context, "$baseUrl/api/ping").apply {
+                requestMethod = "GET"
+                connectTimeout = timeoutMs
+                readTimeout = timeoutMs
+                setRequestProperty("Accept", "application/json")
+            }
+            if (conn.responseCode in 200..299) {
+                val body = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8)).readText()
+                body.contains("shadow-luna")
+            } else {
+                false
+            }
+        } catch (_: Throwable) {
+            false
+        } finally {
+            conn?.disconnect()
+        }
+    }
+
+    /**
+     * Automatically locates Shadow • Luna Laptop Server on active Wi-Fi or Hotspot:
+     * 1) Checks saved URL
+     * 2) Races UDP discovery broadcast (:8800) + parallel TCP /24 subnet sweep (:8000/api/ping)
+     */
+    suspend fun discoverServerOnLan(context: Context): String? = withContext(Dispatchers.IO) {
+        val current = LunaServerConfig.getServerUrl(context)
+        if (pingServer(context, current, 900)) {
+            return@withContext current
+        }
+
+        val ipsAndPrefixes = getLocalLanIpsAndPrefixes()
+        val ownIps = ipsAndPrefixes.map { it.first }.toSet()
+        val prefixes = ipsAndPrefixes.map { it.second }.distinct()
+        if (prefixes.isEmpty()) return@withContext null
+
+        val found = CompletableDeferred<String?>()
+
+        coroutineScope {
+            // Path 1: UDP broadcast beacon on port 8800
+            val udpJob = async {
+                var sock: DatagramSocket? = null
+                try {
+                    sock = DatagramSocket()
+                    findWifiNetwork(context)?.bindSocket(sock)
+                    sock.broadcast = true
+                    sock.soTimeout = 1000
+                    val probe = "SHADOW_DISCOVER_V1".toByteArray(Charsets.UTF_8)
+                    val targets = (listOf("255.255.255.255") + prefixes.map { "$it.255" }).distinct()
+                    for (t in targets) {
+                        try {
+                            sock.send(DatagramPacket(probe, probe.size, InetAddress.getByName(t), DISCOVERY_UDP_PORT))
+                        } catch (_: Throwable) {}
+                    }
+                    val buf = ByteArray(512)
+                    val respPkt = DatagramPacket(buf, buf.size)
+                    sock.receive(respPkt)
+                    val msg = String(respPkt.data, 0, respPkt.length, Charsets.UTF_8)
+                    if (msg.contains("shadow-luna")) {
+                        val ip = respPkt.address.hostAddress
+                        if (!ip.isNullOrBlank()) {
+                            val candidate = "http://$ip:8000"
+                            if (pingServer(context, candidate, 800)) {
+                                found.complete(candidate)
+                            }
+                        }
+                    }
+                } catch (_: Throwable) {
+                } finally {
+                    try { sock?.close() } catch (_: Throwable) {}
+                }
+            }
+
+            // Path 2: Parallel bounded /24 TCP ping sweep
+            val sem = Semaphore(48)
+            val scanJobs = prefixes.flatMap { prefix ->
+                (1..254).map { host ->
+                    val ip = "$prefix.$host"
+                    async {
+                        if (found.isCompleted || ip in ownIps) return@async
+                        sem.withPermit {
+                            if (found.isCompleted) return@withPermit
+                            val candidate = "http://$ip:8000"
+                            if (pingServer(context, candidate, 450)) {
+                                found.complete(candidate)
+                            }
+                        }
+                    }
+                }
+            }
+
+            awaitAll(udpJob, *scanJobs.toTypedArray())
+            if (!found.isCompleted) found.complete(null)
+        }
+
+        val discovered = found.await()
+        if (discovered != null) {
+            LunaServerConfig.setServerUrl(context, discovered)
+        }
+        discovered
+    }
+
+    suspend fun discoverAndSignalMobileReady(context: Context): HandshakeProbeResult = withContext(Dispatchers.IO) {
+        var serverUrl = LunaServerConfig.getServerUrl(context)
+        val firstTry = signalMobileReady(context)
+        firstTry.getOrNull()?.let { dto ->
+            return@withContext HandshakeProbeResult(dto, serverUrl, null)
+        }
+
+        // First attempt failed -> scan LAN via UDP + /24 subnet sweep bound to Wi-Fi
+        val discovered = discoverServerOnLan(context)
+        if (discovered != null) {
+            serverUrl = discovered
+            val retry = signalMobileReady(context)
+            retry.getOrNull()?.let { dto ->
+                return@withContext HandshakeProbeResult(dto, serverUrl, null)
+            }
+        }
+
+        val ips = getLocalLanIpsAndPrefixes().map { it.first }
+        val phoneNetHint = if (ips.isEmpty()) {
+            "Phone is not connected to Wi-Fi or Hotspot."
+        } else {
+            "Phone Wi-Fi IP: ${ips.joinToString(", ")}. Laptop not responding at $serverUrl — open Shadow Desktop → Mobile Sync → Allow Mobile Sync (Firewall)."
+        }
+        HandshakeProbeResult(null, serverUrl, phoneNetHint)
+    }
 
     suspend fun signalMobileReady(context: Context): Result<HandshakeStatusDto> = withContext(Dispatchers.IO) {
         val serverUrl = LunaServerConfig.getServerUrl(context)
@@ -89,20 +293,7 @@ object LunaSyncManager {
             return@withContext Result.failure(IllegalArgumentException("Non-local URL blocked"))
         }
         try {
-            val raw = requestJson("$serverUrl/api/handshake/mobile-ready", "POST", "{}")
-            Result.success(json.decodeFromString<HandshakeStatusDto>(raw))
-        } catch (e: Throwable) {
-            Result.failure(e)
-        }
-    }
-
-    suspend fun fetchHandshakeStatus(context: Context): Result<HandshakeStatusDto> = withContext(Dispatchers.IO) {
-        val serverUrl = LunaServerConfig.getServerUrl(context)
-        if (!LunaServerConfig.isLocalPrivateUrl(serverUrl)) {
-            return@withContext Result.failure(IllegalArgumentException("Non-local URL blocked"))
-        }
-        try {
-            val raw = requestJson("$serverUrl/api/handshake/status", "GET", null)
+            val raw = requestJson(context, "$serverUrl/api/handshake/mobile-ready", "POST", "{}")
             Result.success(json.decodeFromString<HandshakeStatusDto>(raw))
         } catch (e: Throwable) {
             Result.failure(e)
@@ -113,7 +304,7 @@ object LunaSyncManager {
         val serverUrl = LunaServerConfig.getServerUrl(context)
         if (!LunaServerConfig.isLocalPrivateUrl(serverUrl)) return@withContext
         try {
-            requestJson("$serverUrl/api/handshake/cancel", "POST", "{}")
+            requestJson(context, "$serverUrl/api/handshake/cancel", "POST", "{}")
         } catch (_: Throwable) {}
     }
 
@@ -136,9 +327,8 @@ object LunaSyncManager {
                 LunaTokenDto(it.token, it.frequency, it.lastSource, it.lastSeen)
             }
 
-            // Initialize handshake progress on server
             val initProg = json.encodeToString(HandshakeProgressDto(totalUnsynced, 0, 0))
-            requestJson("$serverUrl/api/handshake/progress", "POST", initProg)
+            requestJson(context, "$serverUrl/api/handshake/progress", "POST", initProg)
             onProgress(0, totalUnsynced, 0)
 
             var uploaded = 0
@@ -148,12 +338,11 @@ object LunaSyncManager {
             while (true) {
                 val batch = recordDao.getUnsynced(BATCH_SIZE)
                 if (batch.isEmpty()) {
-                    // Still upload learned tokens snapshot even if all raw records were already sent
                     if (!tokensIncluded && allTokens.isNotEmpty()) {
                         val tokPayload = json.encodeToString(
                             LunaSyncPayloadDto(records = emptyList(), tokens = allTokens)
                         )
-                        val raw = requestJson("$serverUrl/api/sync", "POST", tokPayload)
+                        val raw = requestJson(context, "$serverUrl/api/sync", "POST", tokPayload)
                         val resp = json.decodeFromString<LunaSyncResponseDto>(raw)
                         tokensSent = resp.synced_tokens.coerceAtLeast(allTokens.size)
                         tokensIncluded = true
@@ -178,7 +367,7 @@ object LunaSyncManager {
                         tokens = if (!tokensIncluded) allTokens else emptyList()
                     )
                 )
-                val rawResp = requestJson("$serverUrl/api/sync", "POST", payloadJson)
+                val rawResp = requestJson(context, "$serverUrl/api/sync", "POST", payloadJson)
                 val resp = json.decodeFromString<LunaSyncResponseDto>(rawResp)
 
                 if (resp.status == "SUCCESS") {
@@ -189,7 +378,7 @@ object LunaSyncManager {
                         tokensIncluded = true
                     }
                     val progJson = json.encodeToString(HandshakeProgressDto(totalUnsynced, uploaded, tokensSent))
-                    requestJson("$serverUrl/api/handshake/progress", "POST", progJson)
+                    requestJson(context, "$serverUrl/api/handshake/progress", "POST", progJson)
                     onProgress(uploaded, totalUnsynced, tokensSent)
                 } else {
                     val remaining = recordDao.countUnsynced()
@@ -197,9 +386,8 @@ object LunaSyncManager {
                 }
             }
 
-            // Finalize session on laptop
             val finalJson = json.encodeToString(HandshakeProgressDto(totalUnsynced, uploaded, tokensSent))
-            requestJson("$serverUrl/api/handshake/complete", "POST", finalJson)
+            requestJson(context, "$serverUrl/api/handshake/complete", "POST", finalJson)
 
             val remaining = recordDao.countUnsynced()
             SyncResult(
@@ -216,12 +404,12 @@ object LunaSyncManager {
         }
     }
 
-    private fun requestJson(endpointUrl: String, method: String, body: String?): String {
+    private fun requestJson(context: Context, endpointUrl: String, method: String, body: String?): String {
         var conn: HttpURLConnection? = null
         try {
-            conn = (URL(endpointUrl).openConnection() as HttpURLConnection).apply {
+            conn = openLocalConnection(context, endpointUrl).apply {
                 requestMethod = method
-                connectTimeout = 2500
+                connectTimeout = 2000
                 readTimeout = 8000
                 setRequestProperty("Accept", "application/json")
                 if (body != null) {

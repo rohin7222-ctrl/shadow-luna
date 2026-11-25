@@ -41,6 +41,61 @@ def get_wifi_ip() -> str:
         return "127.0.0.1"
 
 
+def get_all_local_ips() -> list[str]:
+    ips = []
+    try:
+        for ip in socket.gethostbyname_ex(socket.gethostname())[2]:
+            if not ip.startswith("127.") and not ip.startswith("169.254.") and ip not in ips:
+                ips.append(ip)
+    except Exception:
+        pass
+    primary = get_wifi_ip()
+    if primary and not primary.startswith("127.") and primary not in ips:
+        ips.insert(0, primary)
+    return ips or ["127.0.0.1"]
+
+
+_fw_cache = {"checked_at": 0.0, "data": {"rule_exists": False, "wifi_profile": "Unknown", "blocked_likely": False}}
+
+
+def check_firewall_status(force: bool = False) -> dict:
+    now = time.time()
+    if not force and now - _fw_cache["checked_at"] < 4.0:
+        return _fw_cache["data"]
+    no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+    rule_ok = False
+    profile = "Unknown"
+    try:
+        r = subprocess.run(
+            ["netsh", "advfirewall", "firewall", "show", "rule", "name=Shadow Luna Server 8000"],
+            capture_output=True, text=True, timeout=2.5, creationflags=no_window
+        )
+        out = r.stdout or ""
+        if "Enabled:" in out and "Yes" in out and ("Any" in out or "Public" in out or "Private" in out):
+            rule_ok = True
+    except Exception:
+        pass
+    try:
+        p = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "(Get-NetConnectionProfile -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty NetworkCategory)"],
+            capture_output=True, text=True, timeout=2.5, creationflags=no_window
+        )
+        cat = (p.stdout or "").strip()
+        if cat:
+            profile = cat
+    except Exception:
+        pass
+    res = {
+        "rule_exists": rule_ok,
+        "wifi_profile": profile,
+        "blocked_likely": (not rule_ok),
+    }
+    _fw_cache["checked_at"] = now
+    _fw_cache["data"] = res
+    return res
+
+
 def is_port_open(host: str, port: int, timeout: float = 0.35) -> bool:
     try:
         with socket.create_connection((host, port), timeout=timeout):
@@ -108,7 +163,6 @@ class LunaServerController:
                         "0.0.0.0",
                         "--port",
                         str(SERVER_PORT),
-                        "--reload",
                     ],
                     cwd=BASE_DIR,
                     stdout=subprocess.PIPE,
@@ -369,6 +423,7 @@ def start_control_http_server(ctrl: LunaServerController):
                     self._send_json(404, {"error": "Logo missing"})
             elif self.path == "/ctl/studio-data":
                 running = ctrl.is_running()
+                ctrl.wifi_ip = get_wifi_ip()
                 snap = ctrl.get_db_snapshot()
                 hs = {"phase": "IDLE"}
                 if running:
@@ -382,6 +437,8 @@ def start_control_http_server(ctrl: LunaServerController):
                     {
                         "server_running": running,
                         "lan_url": f"http://{ctrl.wifi_ip}:{SERVER_PORT}",
+                        "all_ips": get_all_local_ips(),
+                        "firewall": check_firewall_status(),
                         "snapshot": snap,
                         "handshake": hs,
                     },
@@ -465,12 +522,18 @@ def start_control_http_server(ctrl: LunaServerController):
                 ctrl.reset_brain()
                 self._send_json(200, {"ok": True})
             elif self.path == "/ctl/firewall":
-                cmd = (
-                    "Start-Process powershell -Verb RunAs -ArgumentList "
-                    "'netsh advfirewall firewall add rule name=\"Shadow Luna Server 8000\" "
-                    "dir=in action=allow protocol=TCP localport=8000'"
+                ps_inner = (
+                    "netsh advfirewall firewall delete rule name='Shadow Luna Server 8000' 2>$null; "
+                    "netsh advfirewall firewall add rule name='Shadow Luna Server 8000' dir=in action=allow protocol=TCP localport=8000 profile=any; "
+                    "netsh advfirewall firewall delete rule name='Shadow Luna Discovery 8800' 2>$null; "
+                    "netsh advfirewall firewall add rule name='Shadow Luna Discovery 8800' dir=in action=allow protocol=UDP localport=8800 profile=any"
                 )
-                subprocess.Popen(["powershell", "-NoProfile", "-Command", cmd])
+                cmd = f'Start-Process powershell -Verb RunAs -Wait -ArgumentList "-NoProfile","-Command","{ps_inner}"'
+                try:
+                    subprocess.Popen(["powershell", "-NoProfile", "-Command", cmd])
+                except Exception:
+                    pass
+                _fw_cache["checked_at"] = 0.0
                 self._send_json(200, {"ok": True})
             elif self.path == "/ctl/focus":
                 ctrl.focus_window()

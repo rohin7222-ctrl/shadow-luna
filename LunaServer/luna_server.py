@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import re
+import socket
 import sqlite3
 import threading
 import time
@@ -161,6 +162,10 @@ def _refresh_handshake_locked(now_ms: int):
         if not handshake_state["laptop_ready"] and not handshake_state["mobile_ready"]:
             handshake_state["phase"] = "IDLE"
             handshake_state["last_message"] = ""
+    elif handshake_state["phase"] == "COMPLETED":
+        if not handshake_state["laptop_ready"] and not handshake_state["mobile_ready"]:
+            if handshake_state.get("completed_at", 0) > 0 and now_ms - handshake_state["completed_at"] > 15_000:
+                handshake_state["phase"] = "IDLE"
 
 
 def register_server_release():
@@ -326,6 +331,38 @@ class PublishUpdateRequest(BaseModel):
     changelog: str
     estimated_seconds: int = 12
     version: Optional[str] = None
+
+
+DISCOVERY_PORT = 8800
+
+
+def _udp_discovery_loop():
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("0.0.0.0", DISCOVERY_PORT))
+    except Exception:
+        return
+    reply = json.dumps({"service": "shadow-luna", "port": 8000, "version": BASE_VERSION}).encode("utf-8")
+    while True:
+        try:
+            data, addr = sock.recvfrom(512)
+            if b"SHADOW_DISCOVER" in data:
+                sock.sendto(reply, addr)
+        except Exception:
+            time.sleep(0.2)
+
+
+@app.on_event("startup")
+def start_lan_discovery():
+    threading.Thread(target=_udp_discovery_loop, daemon=True).start()
+
+
+@app.get("/api/ping")
+def api_ping():
+    with handshake_lock:
+        phase = handshake_state["phase"]
+    return {"service": "shadow-luna", "port": 8000, "version": BASE_VERSION, "phase": phase}
 
 
 # ─── 2-Way Handshake Endpoints ("Connect to Server" <-> "Connect to App") ───
