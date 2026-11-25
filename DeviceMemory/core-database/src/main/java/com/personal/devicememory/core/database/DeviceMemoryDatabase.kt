@@ -18,6 +18,8 @@ import com.personal.devicememory.core.database.entity.CollectedRecordEntity
 import com.personal.devicememory.core.database.entity.CollectorConfigEntity
 import com.personal.devicememory.core.database.entity.LearnedAssociationEntity
 import com.personal.devicememory.core.database.entity.LearnedTokenEntity
+import com.personal.devicememory.core.database.entity.NeuralPolicyStateEntity
+import com.personal.devicememory.core.database.entity.NeuralVectorEntity
 import com.personal.devicememory.core.database.entity.SimulationStatsEntity
 import com.personal.devicememory.core.database.entity.SyncBookmarkEntity
 import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
@@ -30,9 +32,11 @@ import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
         LearnedTokenEntity::class,
         LearnedAssociationEntity::class,
         BrainInsightEntity::class,
-        SimulationStatsEntity::class
+        SimulationStatsEntity::class,
+        NeuralVectorEntity::class,
+        NeuralPolicyStateEntity::class
     ],
-    version = 3,
+    version = 4,
     exportSchema = false
 )
 abstract class DeviceMemoryDatabase : RoomDatabase() {
@@ -113,6 +117,42 @@ abstract class DeviceMemoryDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `neural_vectors` (
+                        `concept` TEXT NOT NULL,
+                        `vector_csv` TEXT NOT NULL,
+                        `momentum_csv` TEXT NOT NULL,
+                        `fisher_importance` REAL NOT NULL,
+                        `surprise_score` REAL NOT NULL,
+                        `update_steps` INTEGER NOT NULL,
+                        `updated_at` INTEGER NOT NULL,
+                        PRIMARY KEY(`concept`)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `neural_policy_state` (
+                        `id` INTEGER NOT NULL,
+                        `weight_exact` REAL NOT NULL,
+                        `weight_graph` REAL NOT NULL,
+                        `weight_vector` REAL NOT NULL,
+                        `weight_temporal` REAL NOT NULL,
+                        `last_grpo_reward` REAL NOT NULL,
+                        `self_play_correct` INTEGER NOT NULL,
+                        `self_play_total` INTEGER NOT NULL,
+                        `avg_surprise` REAL NOT NULL,
+                        `updated_at` INTEGER NOT NULL,
+                        PRIMARY KEY(`id`)
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
+
         init {
             try {
                 System.loadLibrary("sqlcipher")
@@ -153,7 +193,7 @@ abstract class DeviceMemoryDatabase : RoomDatabase() {
                 DB_NAME
             )
                 .openHelperFactory(factory)
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
                 .fallbackToDestructiveMigration()
                 .build()
         }

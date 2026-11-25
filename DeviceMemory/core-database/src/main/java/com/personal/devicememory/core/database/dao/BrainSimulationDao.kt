@@ -6,6 +6,8 @@ import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import com.personal.devicememory.core.database.entity.BrainInsightEntity
 import com.personal.devicememory.core.database.entity.LearnedAssociationEntity
+import com.personal.devicememory.core.database.entity.NeuralPolicyStateEntity
+import com.personal.devicememory.core.database.entity.NeuralVectorEntity
 import com.personal.devicememory.core.database.entity.SimulationStatsEntity
 
 @Dao
@@ -79,4 +81,38 @@ interface BrainSimulationDao {
 
     @Query("DELETE FROM simulation_stats")
     suspend fun clearStats()
+
+    // ─── 2026 Neural Vectors (Titans + EWC + Skip-Gram SGD) ───
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertVectors(vectors: List<NeuralVectorEntity>)
+
+    @Query("SELECT * FROM neural_vectors WHERE concept IN (:concepts)")
+    suspend fun getVectorsByConcepts(concepts: List<String>): List<NeuralVectorEntity>
+
+    @Query("SELECT * FROM neural_vectors ORDER BY fisher_importance DESC, updated_at DESC LIMIT :limit")
+    suspend fun getAllVectors(limit: Int = 1200): List<NeuralVectorEntity>
+
+    @Query("SELECT COUNT(*) FROM neural_vectors")
+    suspend fun countVectors(): Int
+
+    @Query("""
+        DELETE FROM neural_vectors
+        WHERE concept NOT IN (
+            SELECT concept FROM neural_vectors ORDER BY fisher_importance DESC, updated_at DESC LIMIT :keepLimit
+        )
+    """)
+    suspend fun trimVectors(keepLimit: Int = 1200)
+
+    // ─── GRPO Self-Play Policy Weights ───
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun savePolicyState(state: NeuralPolicyStateEntity)
+
+    @Query("SELECT * FROM neural_policy_state WHERE id = 1 LIMIT 1")
+    suspend fun getPolicyState(): NeuralPolicyStateEntity?
+
+    @Query("DELETE FROM neural_vectors")
+    suspend fun clearVectors()
+
+    @Query("DELETE FROM neural_policy_state")
+    suspend fun clearPolicyState()
 }

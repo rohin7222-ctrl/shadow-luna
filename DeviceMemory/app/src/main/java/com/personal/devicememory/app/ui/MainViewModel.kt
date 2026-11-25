@@ -90,6 +90,9 @@ data class MainUiState(
     val simulationRunning: Boolean = false,
     val simulationPasses: Int = 0,
     val consolidatedLinks: Int = 0,
+    val neuralVectorsCount: Int = 0,
+    val selfPlayAccuracyPct: Int = 0,
+    val topPolicyStrategy: String = "",
     val topSimulatedTopics: List<String> = emptyList(),
 )
 
@@ -115,6 +118,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         simulationRunning = snap.isSimulating,
                         simulationPasses = snap.totalPasses,
                         consolidatedLinks = snap.associationsCount,
+                        neuralVectorsCount = snap.neuralVectorsCount,
+                        selfPlayAccuracyPct = snap.selfPlayAccuracyPct,
+                        topPolicyStrategy = snap.topPolicyStrategy,
                         topSimulatedTopics = snap.topSimulatedConcepts
                     )
                 }
@@ -150,19 +156,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (q.isEmpty()) return
         val app = getApplication<Application>()
         val now = System.currentTimeMillis()
+        val sessionHistory = _uiState.value.messages
+            .filter { it.isUser }
+            .takeLast(3)
+            .map { it.text }
         _uiState.update {
             it.copy(
                 messages = it.messages + OfflineChatMessage(id = now, isUser = true, text = q)
             )
         }
         viewModelScope.launch {
-            val reply = OnDeviceLunaBrain.askOffline(app, q)
+            val reply = OnDeviceLunaBrain.askOffline(app, q, sessionHistory)
             _uiState.update {
                 it.copy(
                     totalRecords = reply.totalMemories,
                     totalTokens = reply.totalTokens,
                     simulationPasses = reply.simulationPasses,
                     consolidatedLinks = reply.associationsCount,
+                    neuralVectorsCount = reply.neuralVectorsCount,
+                    selfPlayAccuracyPct = reply.selfPlayAccuracyPct,
                     messages = it.messages + OfflineChatMessage(
                         id = System.currentTimeMillis() + 1,
                         isUser = false,
@@ -466,6 +478,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         unsyncedRecords = 0,
                         simulationPasses = 0,
                         consolidatedLinks = 0,
+                        neuralVectorsCount = 0,
+                        selfPlayAccuracyPct = 0,
+                        topPolicyStrategy = "",
                         topSimulatedTopics = emptyList(),
                         statusMessage = "Phone vault & offline AI wiped to 0"
                     )

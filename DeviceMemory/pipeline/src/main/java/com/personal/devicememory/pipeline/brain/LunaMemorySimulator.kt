@@ -27,6 +27,10 @@ data class SimulationSnapshot(
     val associationsCount: Int = 0,
     val insightsCount: Int = 0,
     val lastBatchSize: Int = 0,
+    val neuralVectorsCount: Int = 0,
+    val selfPlayAccuracyPct: Int = 0,
+    val avgSurprise: Double = 0.0,
+    val topPolicyStrategy: String = "",
     val topSimulatedConcepts: List<String> = emptyList()
 )
 
@@ -95,17 +99,36 @@ object LunaMemorySimulator {
         val db = DeviceMemoryDatabase.getInstance(context)
         val brainDao = db.brainSimulationDao()
         val stats = brainDao.getStats()
+        val policy = brainDao.getPolicyState()
         val top = brainDao.getTopInsights(5).map { it.concept }
+        val acc = if (policy != null && policy.selfPlayTotal > 0) {
+            ((policy.selfPlayCorrect.toDouble() / policy.selfPlayTotal) * 100.0).toInt().coerceIn(0, 100)
+        } else 0
         val snap = SimulationSnapshot(
             isSimulating = running,
             totalPasses = stats?.totalPasses ?: 0,
             associationsCount = stats?.associationsCount ?: brainDao.countAssociations(),
             insightsCount = stats?.insightsCount ?: brainDao.countInsights(),
             lastBatchSize = stats?.lastBatchRecords ?: 0,
+            neuralVectorsCount = brainDao.countVectors(),
+            selfPlayAccuracyPct = acc,
+            avgSurprise = policy?.avgSurprise ?: 0.0,
+            topPolicyStrategy = policy?.let { formatTopPolicy(it) } ?: "",
             topSimulatedConcepts = top
         )
         _snapshot.value = snap
         return snap
+    }
+
+    private fun formatTopPolicy(p: com.personal.devicememory.core.database.entity.NeuralPolicyStateEntity): String {
+        val entries = listOf(
+            "Exact" to p.weightExact,
+            "Graph" to p.weightGraph,
+            "Vector" to p.weightVector,
+            "Temporal" to p.weightTemporal
+        )
+        val best = entries.maxByOrNull { it.second } ?: return ""
+        return "${best.first} ×${String.format(java.util.Locale.US, "%.1f", best.second)}"
     }
 
     /**
@@ -311,8 +334,23 @@ object LunaMemorySimulator {
             brainDao.trimAssociations(keepLimit = 2500)
         }
 
+        // Run 2026 continual neural training pass (Skip-Gram SGD + Titans Surprise/Momentum + EWC + GRPO Self-Play)
+        val pairSignals = pairAccums.values.map { PairSignal(it.tokenA, it.tokenB, it.weight) }
+        val recConcepts = prepared.mapNotNull { (_, concepts, bucket) ->
+            if (concepts.isNotEmpty()) bucket to concepts else null
+        }
+        val allBatchConcepts = conceptAccums.keys.toList()
+        val trainMetrics = FrontierNeuralTrainer.trainPass(
+            brainDao = brainDao,
+            pairs = pairSignals,
+            recordConceptsList = recConcepts,
+            allBatchConcepts = allBatchConcepts,
+            passIndex = nextPass
+        )
+
         val totalLinks = brainDao.countAssociations()
         val totalInsights = brainDao.countInsights()
+        val totalVecs = brainDao.countVectors()
         val topConceptsDisplay = brainDao.getTopInsights(5).map { it.concept }
 
         brainDao.saveStats(
@@ -332,6 +370,10 @@ object LunaMemorySimulator {
             associationsCount = totalLinks,
             insightsCount = totalInsights,
             lastBatchSize = batch.size,
+            neuralVectorsCount = totalVecs,
+            selfPlayAccuracyPct = trainMetrics.selfPlayAccuracyPct,
+            avgSurprise = trainMetrics.avgSurprise,
+            topPolicyStrategy = formatTopPolicy(trainMetrics.policyState),
             topSimulatedConcepts = topConceptsDisplay
         )
     }

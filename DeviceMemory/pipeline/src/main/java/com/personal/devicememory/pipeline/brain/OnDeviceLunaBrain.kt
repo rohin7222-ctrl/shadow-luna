@@ -6,9 +6,12 @@ import com.personal.devicememory.core.common.util.TimestampUtil
 import com.personal.devicememory.core.database.DeviceMemoryDatabase
 import com.personal.devicememory.core.database.entity.BrainInsightEntity
 import com.personal.devicememory.core.database.entity.CollectedRecordEntity
+import com.personal.devicememory.core.database.entity.NeuralPolicyStateEntity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.util.Locale
 import kotlin.math.min
+import kotlin.math.roundToInt
 
 data class OfflineLunaReply(
     val query: String,
@@ -17,6 +20,8 @@ data class OfflineLunaReply(
     val totalTokens: Int,
     val simulationPasses: Int = 0,
     val associationsCount: Int = 0,
+    val neuralVectorsCount: Int = 0,
+    val selfPlayAccuracyPct: Int = 0,
     val response: String
 )
 
@@ -28,16 +33,16 @@ enum class QueryIntent {
 }
 
 /**
- * 100% On-Device, Zero-Prebuilt-Knowledge AI Reasoning Engine.
+ * 100% On-Device, Zero-Prebuilt-Knowledge 2026 AI Reasoning Engine.
  * Combines:
  *  - Continuous simulated associative graph (`learned_associations`)
- *  - Consolidated behavioral habits (`brain_insights`)
- *  - Fuzzy typo matching (Levenshtein edit distance)
- *  - Intent-aware response synthesis & burst deduplication
+ *  - Google Titans Surprise + Skip-Gram EWC Neural Vectors (`neural_vectors`)
+ *  - DeepSeek-style GRPO Self-Play Policy Weights (`neural_policy_state`)
+ *  - Test-Time Training (TTT) inner-loop session adaptation during live inference
+ *  - Fuzzy typo matching (Levenshtein edit distance) & burst deduplication
  */
 object OnDeviceLunaBrain {
 
-    // Matches English + Unicode Tamil (\p{L} letters + \p{M} vowel/virama combining marks) cleanly
     private val TOKEN_REGEX = Regex("""[\p{L}\p{M}\p{N}_]{2,40}""")
 
     private val STOP_QUERY_WORDS = setOf(
@@ -96,7 +101,11 @@ object OnDeviceLunaBrain {
         }
     }
 
-    suspend fun askOffline(context: Context, rawQuery: String): OfflineLunaReply = withContext(Dispatchers.IO) {
+    suspend fun askOffline(
+        context: Context,
+        rawQuery: String,
+        recentSessionQueries: List<String> = emptyList()
+    ): OfflineLunaReply = withContext(Dispatchers.IO) {
         val query = rawQuery.trim()
         val queryLower = query.lowercase()
         val db = DeviceMemoryDatabase.getInstance(context)
@@ -109,13 +118,18 @@ object OnDeviceLunaBrain {
         var stats = brainDao.getStats()
         var assocCount = stats?.associationsCount ?: brainDao.countAssociations()
 
-        // Ensure at least 1 simulation pass has run if records exist and stats are still 0
+        // Ensure at least 1 full simulation + neural training pass runs when data exists
         if (totalMemories > 0 && (stats == null || stats.totalPasses == 0)) {
             val fresh = LunaMemorySimulator.runSinglePass(context)
             stats = brainDao.getStats()
             assocCount = fresh.associationsCount
         }
         val simPasses = stats?.totalPasses ?: 0
+        val policy = brainDao.getPolicyState() ?: NeuralPolicyStateEntity()
+        val allVectors = brainDao.getAllVectors(900)
+        val selfPlayAccPct = if (policy.selfPlayTotal > 0) {
+            ((policy.selfPlayCorrect.toDouble() / policy.selfPlayTotal.toDouble()) * 100.0).toInt().coerceIn(0, 100)
+        } else 0
 
         if (totalMemories == 0) {
             return@withContext OfflineLunaReply(
@@ -125,6 +139,8 @@ object OnDeviceLunaBrain {
                 totalTokens = totalTokens,
                 simulationPasses = simPasses,
                 associationsCount = assocCount,
+                neuralVectorsCount = allVectors.size,
+                selfPlayAccuracyPct = selfPlayAccPct,
                 response = buildString {
                     appendLine("⭕ [Offline • Untrained • 0 Memories]")
                     appendLine("\"$query\" பற்றி எனக்கு எதுவும் தெரியாது — போனில் இன்னும் எதுவும் கற்கப்படவில்லை.")
@@ -136,11 +152,12 @@ object OnDeviceLunaBrain {
         val intent = classifyIntent(queryLower)
         val topInsights = brainDao.getTopInsights(12)
 
-        // Overall habit/profile summary requested from simulated insights
         if (intent == QueryIntent.SUMMARY_PROFILE && topInsights.isNotEmpty()) {
             val summaryBody = buildString {
-                appendLine("🧠 [Simulated Intelligence Profile • Pass #$simPasses • $assocCount links]")
-                appendLine("From $totalMemories offline memories across your phone, here are the strongest patterns I consolidated:")
+                appendLine("🧠 [Titans+GRPO Profile • Pass #$simPasses • ${allVectors.size} neural vecs • $selfPlayAccPct% Self-Play]")
+                appendLine(
+                    "Learned Policy Weights — Exact ×${fmt(policy.weightExact)}, Graph ×${fmt(policy.weightGraph)}, Vector ×${fmt(policy.weightVector)}, Temporal ×${fmt(policy.weightTemporal)}"
+                )
                 appendLine()
                 for (ins in topInsights.take(6)) {
                     appendLine("• ${ins.concept.replaceFirstChar { it.uppercase() }} (${ins.category}): ${ins.summaryFact}")
@@ -153,6 +170,8 @@ object OnDeviceLunaBrain {
                 totalTokens = totalTokens,
                 simulationPasses = simPasses,
                 associationsCount = assocCount,
+                neuralVectorsCount = allVectors.size,
+                selfPlayAccuracyPct = selfPlayAccPct,
                 response = summaryBody
             )
         }
@@ -160,12 +179,11 @@ object OnDeviceLunaBrain {
         val rawTokens = tokenize(query)
         val meaningfulTokens = rawTokens.filter { it !in STOP_QUERY_WORDS }.ifEmpty { rawTokens }
 
-        // Fuzzy typo expansion using learned vocabulary + simulated insights
         val expandedTerms = LinkedHashSet<String>()
         expandedTerms.addAll(meaningfulTokens)
 
         val topVocab = tokenDao.getTopTokens(250).map { it.token }
-        val vocabPool = (topInsights.map { it.concept } + topVocab).distinct()
+        val vocabPool = (topInsights.map { it.concept } + allVectors.map { it.concept } + topVocab).distinct()
         val fuzzyCorrected = ArrayList<String>()
 
         for (t in meaningfulTokens) {
@@ -185,7 +203,7 @@ object OnDeviceLunaBrain {
             }
         }
 
-        // Gather matching simulated insights & 1-hop graph neighbors
+        // Gather matching insights & 1-hop graph neighbors
         val matchedInsights = LinkedHashMap<String, BrainInsightEntity>()
         val graphNeighbors = LinkedHashSet<String>()
         for (term in expandedTerms) {
@@ -204,28 +222,55 @@ object OnDeviceLunaBrain {
             }
         }
 
-        // Score records using direct terms + fuzzy terms + top simulated graph hop boost
-        val scored = linkedMapOf<String, Pair<CollectedRecordEntity, Int>>()
+        // Test-Time Training (TTT) inner-loop vector adaptation using recent conversation context
+        val recentSessionConcepts = recentSessionQueries
+            .flatMap { LunaMemorySimulator.extractSemanticConcepts("SESSION", it) }
+            .filter { it !in STOP_QUERY_WORDS }
+            .distinct()
+            .take(6)
+
+        val tttSemanticNeighbors = FrontierNeuralTrainer.adaptAndQueryVectors(
+            queryConcepts = expandedTerms.toList(),
+            recentSessionConcepts = recentSessionConcepts,
+            allVectors = allVectors,
+            topK = 5
+        )
+
+        // Score candidate memories dynamically using GRPO learned policy weights!
+        val scored = linkedMapOf<String, Pair<CollectedRecordEntity, Double>>()
+        val exactScore = 10.0 * policy.weightExact
         for (rec in recordDao.searchByText(query, limit = 10)) {
-            scored[rec.id] = rec to 12
+            scored[rec.id] = rec to exactScore
         }
         for (tok in expandedTerms) {
+            val baseW = (if (tok in meaningfulTokens) 4.0 else 2.2) * policy.weightExact
             for (rec in recordDao.searchByText(tok, limit = 12)) {
                 val existing = scored[rec.id]
-                val boost = if (tok in meaningfulTokens) 4 else 2
+                val bonus = if (intent == QueryIntent.TEMPORAL) policy.weightTemporal * 0.6 else 0.0
                 if (existing != null) {
-                    scored[rec.id] = existing.first to (existing.second + boost)
+                    scored[rec.id] = existing.first to (existing.second + baseW + bonus)
                 } else {
-                    scored[rec.id] = rec to boost
+                    scored[rec.id] = rec to (baseW + bonus)
                 }
             }
         }
-        // Subtle 1-hop discovery boost when direct evidence exists
         for (hop in graphNeighbors.take(3)) {
+            val hopBoost = 1.5 * policy.weightGraph
             for (rec in recordDao.searchByText(hop, limit = 3)) {
                 val existing = scored[rec.id]
                 if (existing != null) {
-                    scored[rec.id] = existing.first to (existing.second + 1)
+                    scored[rec.id] = existing.first to (existing.second + hopBoost)
+                }
+            }
+        }
+        for ((vecConcept, sim) in tttSemanticNeighbors.take(3)) {
+            val vecBoost = sim * 3.0 * policy.weightVector
+            for (rec in recordDao.searchByText(vecConcept, limit = 4)) {
+                val existing = scored[rec.id]
+                if (existing != null) {
+                    scored[rec.id] = existing.first to (existing.second + vecBoost)
+                } else {
+                    scored[rec.id] = rec to vecBoost
                 }
             }
         }
@@ -233,7 +278,7 @@ object OnDeviceLunaBrain {
         val ranked = deduplicateEvidence(
             scored.values
                 .sortedWith(
-                    compareByDescending<Pair<CollectedRecordEntity, Int>> { it.second }
+                    compareByDescending<Pair<CollectedRecordEntity, Double>> { it.second }
                         .thenByDescending { it.first.timestamp }
                 )
         ).take(4)
@@ -248,7 +293,7 @@ object OnDeviceLunaBrain {
             emptyList()
         }
 
-        if (ranked.isEmpty() && matchedInsights.isEmpty() && matchedTokens.isEmpty()) {
+        if (ranked.isEmpty() && matchedInsights.isEmpty() && matchedTokens.isEmpty() && tttSemanticNeighbors.isEmpty()) {
             val realTopics = topInsights.take(4).joinToString(", ") { it.concept }
             return@withContext OfflineLunaReply(
                 query = query,
@@ -257,34 +302,44 @@ object OnDeviceLunaBrain {
                 totalTokens = totalTokens,
                 simulationPasses = simPasses,
                 associationsCount = assocCount,
+                neuralVectorsCount = allVectors.size,
+                selfPlayAccuracyPct = selfPlayAccPct,
                 response = buildString {
                     appendLine("⚠️ [Offline • Untrained for \"$query\"]")
-                    appendLine("Checked $totalMemories memories & $assocCount graph links across $simPasses simulation passes — \"$query\" never appeared in your device data.")
+                    appendLine("Checked $totalMemories memories, $assocCount links & ${allVectors.size} neural vectors (Pass #$simPasses • $selfPlayAccPct% GRPO Self-Play) — \"$query\" never appeared in your data.")
                     if (realTopics.isNotBlank()) {
-                        append("Simulated patterns ready in your vault: $realTopics")
+                        append("Trained concepts ready in vault: $realTopics")
                     }
                 }
             )
         }
 
+        val surpriseHint = if (policy.avgSurprise > 0.0) {
+            " • Surprise ${(policy.avgSurprise * 100).roundToInt()}%"
+        } else ""
+
         val response = buildString {
-            appendLine("🧠 [AI Synthesis • Pass #$simPasses • $assocCount links]")
+            appendLine("🧠 [Titans+TTT+GRPO • Pass #$simPasses • ${allVectors.size} vecs • ${selfPlayAccPct}% Self-Play$surpriseHint]")
             if (fuzzyCorrected.isNotEmpty()) {
-                appendLine("Matched typo: ${fuzzyCorrected.joinToString(", ")}")
+                appendLine("Fuzzy Match: ${fuzzyCorrected.joinToString(", ")}")
             }
             if (matchedInsights.isNotEmpty()) {
                 val primary = matchedInsights.values.first()
-                appendLine("Pattern (${primary.concept}): ${primary.summaryFact}")
+                appendLine("Habit (${primary.concept}): ${primary.summaryFact}")
+            }
+            if (tttSemanticNeighbors.isNotEmpty()) {
+                val vecText = tttSemanticNeighbors.take(4).joinToString(", ") { "${it.first} (${fmt(it.second)})" }
+                appendLine("TTT Semantic Neighbors: $vecText")
             }
             if (graphNeighbors.isNotEmpty()) {
-                appendLine("Graph Links: ${graphNeighbors.take(5).joinToString(" ↔ ")}")
+                appendLine("Graph Links: ${graphNeighbors.take(4).joinToString(" ↔ ")}")
             }
             if (matchedTokens.isNotEmpty()) {
                 appendLine("Key Signals: ${matchedTokens.joinToString(", ") { "${it.token} (×${it.frequency})" }}")
             }
             if (ranked.isNotEmpty()) {
                 appendLine()
-                appendLine("Evidence:")
+                appendLine("Top Evidence:")
                 for ((rec, _) in ranked) {
                     val ts = TimestampUtil.formatForDisplay(rec.timestamp)
                     appendLine("• [${rec.sourceType} • $ts] ${cleanEvidenceLine(rec.textContent)}")
@@ -299,22 +354,22 @@ object OnDeviceLunaBrain {
             totalTokens = totalTokens,
             simulationPasses = simPasses,
             associationsCount = assocCount,
+            neuralVectorsCount = allVectors.size,
+            selfPlayAccuracyPct = selfPlayAccPct,
             response = response
         )
     }
+
+    private fun fmt(v: Double): String = String.format(Locale.US, "%.2f", v)
 
     private fun cleanEvidenceLine(text: String?): String {
         if (text.isNullOrBlank()) return "Metadata"
         return (SensitiveContentFilter.redact(text.replace('\n', ' ').trim()) ?: "").take(140)
     }
 
-    /**
-     * Suppresses repetitive burst spam (e.g., multiple identical "WhatsApp: Sending...")
-     * so every evidence line brings distinct information.
-     */
-    private fun deduplicateEvidence(sorted: List<Pair<CollectedRecordEntity, Int>>): List<Pair<CollectedRecordEntity, Int>> {
+    private fun deduplicateEvidence(sorted: List<Pair<CollectedRecordEntity, Double>>): List<Pair<CollectedRecordEntity, Double>> {
         val seenNorm = HashSet<String>()
-        val result = ArrayList<Pair<CollectedRecordEntity, Int>>()
+        val result = ArrayList<Pair<CollectedRecordEntity, Double>>()
         for (pair in sorted) {
             val raw = (pair.first.textContent ?: "").trim()
             if (raw.endsWith("Sending...", ignoreCase = true)) continue

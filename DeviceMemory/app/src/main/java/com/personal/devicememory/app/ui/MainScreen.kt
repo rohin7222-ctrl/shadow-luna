@@ -217,7 +217,7 @@ fun MainScreen(
                                         }
                                         Text(
                                             text = if (uiState.totalRecords > 0 && uiState.simulationPasses > 0) {
-                                                "Luna • Simulating #${uiState.simulationPasses} • ${uiState.consolidatedLinks} links"
+                                                "Pass #${uiState.simulationPasses} • ${uiState.neuralVectorsCount} vecs • GRPO ${uiState.selfPlayAccuracyPct}%"
                                             } else {
                                                 "Luna • Offline"
                                             },
@@ -455,6 +455,9 @@ fun MainScreen(
                         totalRecords = uiState.totalRecords,
                         simulationPasses = uiState.simulationPasses,
                         consolidatedLinks = uiState.consolidatedLinks,
+                        neuralVectorsCount = uiState.neuralVectorsCount,
+                        selfPlayAccuracyPct = uiState.selfPlayAccuracyPct,
+                        topPolicyStrategy = uiState.topPolicyStrategy,
                         topTopics = uiState.topSimulatedTopics,
                         onSendMessage = onSendOfflineMessage
                     )
@@ -533,6 +536,9 @@ private fun OfflineChatScreen(
     totalRecords: Int,
     simulationPasses: Int,
     consolidatedLinks: Int,
+    neuralVectorsCount: Int,
+    selfPlayAccuracyPct: Int,
+    topPolicyStrategy: String,
     topTopics: List<String>,
     onSendMessage: (String) -> Unit
 ) {
@@ -612,7 +618,8 @@ private fun OfflineChatScreen(
                         if (totalRecords == 0) {
                             "Blank-slate on-device AI. Ask anything below to verify she speaks only from what she learns."
                         } else {
-                            "Continuously simulating $totalRecords memories (${simulationPasses} passes • $consolidatedLinks graph links). Ask about your real patterns below."
+                            val policyNote = if (topPolicyStrategy.isNotBlank()) " • Policy: $topPolicyStrategy" else ""
+                            "Titans + TTT + GRPO Self-Play active over $totalRecords memories ($neuralVectorsCount neural vecs • $consolidatedLinks links • ${selfPlayAccuracyPct}% acc$policyNote)."
                         },
                         style = MaterialTheme.typography.bodySmall,
                         color = TextMuted,
