@@ -20,6 +20,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -64,6 +65,7 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Photo
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.SystemUpdate
@@ -160,6 +162,7 @@ fun MainScreen(
     onToggleVoiceLanguage: () -> Unit,
     onStitchEpisodesNow: () -> Unit,
     onAskAboutMoment: (String) -> Unit,
+    onRunSimulationBurst: () -> Unit,
     onDismissStatus: () -> Unit,
     onDeleteAll: () -> Unit,
     onShowDeleteConfirmation: () -> Unit,
@@ -232,7 +235,8 @@ fun MainScreen(
                                                 "Luna • Offline"
                                             },
                                             style = MaterialTheme.typography.labelSmall,
-                                            color = if (uiState.simulationRunning && uiState.totalRecords > 0) CyanAccent else TextMuted
+                                            color = if (uiState.simulationRunning && uiState.totalRecords > 0) CyanAccent else TextMuted,
+                                            modifier = Modifier.clickable { onNavigate(ActiveScreen.NEURAL_LAB) }
                                         )
                                     }
                                 }
@@ -370,6 +374,26 @@ fun MainScreen(
                                         DropdownMenuItem(
                                             text = {
                                                 Text(
+                                                    "Neural Simulation Lab",
+                                                    color = TextPrimary,
+                                                    fontWeight = FontWeight.Medium
+                                                )
+                                            },
+                                            leadingIcon = {
+                                                Icon(
+                                                    Icons.Default.Psychology,
+                                                    contentDescription = null,
+                                                    tint = CyanAccent
+                                                )
+                                            },
+                                            onClick = {
+                                                menuExpanded = false
+                                                onNavigate(ActiveScreen.NEURAL_LAB)
+                                            }
+                                        )
+                                        DropdownMenuItem(
+                                            text = {
+                                                Text(
                                                     "Learning Permission",
                                                     color = TextPrimary,
                                                     fontWeight = FontWeight.Medium
@@ -460,6 +484,39 @@ fun MainScreen(
                             actions = {
                                 IconButton(onClick = onStitchEpisodesNow) {
                                     Icon(Icons.Default.Refresh, contentDescription = "Stitch Episodes", tint = CyanAccent)
+                                }
+                            }
+                        )
+                    }
+
+                    ActiveScreen.NEURAL_LAB -> {
+                        TopAppBar(
+                            colors = TopAppBarDefaults.topAppBarColors(
+                                containerColor = ObsidianBg,
+                                titleContentColor = TextPrimary
+                            ),
+                            navigationIcon = {
+                                IconButton(onClick = { onNavigate(ActiveScreen.MAIN_CHAT) }) {
+                                    Icon(
+                                        Icons.AutoMirrored.Filled.ArrowBack,
+                                        contentDescription = "Back",
+                                        tint = TextPrimary
+                                    )
+                                }
+                            },
+                            title = {
+                                Column {
+                                    Text("Neural Simulation Lab", fontWeight = FontWeight.Bold)
+                                    Text(
+                                        "Pass #${uiState.simulationPasses} • JEPA ${uiState.jepaAccuracyPct}% • GRPO ${uiState.selfPlayAccuracyPct}%",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = CyanAccent
+                                    )
+                                }
+                            },
+                            actions = {
+                                IconButton(onClick = onRunSimulationBurst, enabled = !uiState.isBurstSimulating) {
+                                    Icon(Icons.Default.Refresh, contentDescription = "Dream Burst", tint = CyanAccent)
                                 }
                             }
                         )
@@ -599,6 +656,14 @@ fun MainScreen(
                         onAskAboutMoment = onAskAboutMoment,
                         onStitchNow = onStitchEpisodesNow,
                         onOpenPermissions = { onNavigate(ActiveScreen.LEARNING_PERMISSION) }
+                    )
+                }
+
+                ActiveScreen.NEURAL_LAB -> {
+                    NeuralLabSlide(
+                        uiState = uiState,
+                        onRunBurst = onRunSimulationBurst,
+                        onAskTopic = onAskAboutMoment
                     )
                 }
 

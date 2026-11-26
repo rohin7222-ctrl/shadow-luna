@@ -162,10 +162,33 @@ class OnDeviceLunaBrainTest {
 
         val audioConcepts = LunaMemorySimulator.extractSemanticConcepts(
             "AUDIO",
-            "Audio: Voice Note (15s) [Speech-Dominant, VAD 72%, 1120Hz, ac_042]"
+            "Audio: Voice Note (15s) [Speech-Dominant, VAD 72%, 1120Hz, ac_042, spk_01]"
         )
         assertTrue(audioConcepts.contains("speech"))
+        assertTrue(audioConcepts.contains("spk_01"))
         assertTrue(!audioConcepts.contains("vad"))
         assertTrue(!audioConcepts.contains("hz"))
+    }
+
+    @Test
+    fun hardNegativeInfoNceMiningAndSpeakerClusterExtractionWork() {
+        val vCam = FrontierNeuralTrainer.initConceptVector("camera")
+        val vImg = FrontierNeuralTrainer.l2Normalize(FloatArray(FrontierNeuralTrainer.EMBEDDING_DIM) { i ->
+            vCam[i] * 0.92f + 0.08f
+        })
+        val vBank = FloatArray(FrontierNeuralTrainer.EMBEDDING_DIM) { i -> -vCam[i] }
+        val vecs = mapOf(
+            "camera" to vCam,
+            "photo" to vCam,
+            "imposter_img" to vImg,
+            "bank" to FrontierNeuralTrainer.l2Normalize(vBank)
+        )
+        val picked = FrontierNeuralTrainer.findHardNegativeConcept(
+            anchor = "camera",
+            candidates = listOf("camera", "photo", "imposter_img", "bank"),
+            vecs = vecs,
+            isCoOccurring = { a, b -> (a == "camera" && b == "photo") || (a == "photo" && b == "camera") }
+        )
+        assertEquals("imposter_img", picked)
     }
 }

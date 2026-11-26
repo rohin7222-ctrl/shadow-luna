@@ -16,7 +16,9 @@ data class FuturePassMetrics(
     val jepaAccuracyPct: Int = 0,
     val avgFreeEnergy: Double = 0.0,
     val avgFfGoodness: Double = 0.0,
-    val curiosityTarget: String = ""
+    val curiosityTarget: String = "",
+    val dreamedChains: List<String> = emptyList(),
+    val dreamedLinksCount: Int = 0
 )
 
 /**
@@ -213,7 +215,8 @@ object FutureNeuralArchitectures {
         pairs: List<PairSignal>,
         timelineTransitions: List<Triple<String, String, Long>>, // (currConcept, nextConcept, timestampMs)
         conceptHits: Map<String, Int>,
-        passIndex: Int
+        passIndex: Int,
+        eventDeltasMs: List<Long> = emptyList()
     ): FuturePassMetrics {
         val concepts = (conceptHits.keys + pairs.flatMap { listOf(it.tokenA, it.tokenB) }).distinct()
         if (concepts.isEmpty()) {
@@ -336,12 +339,14 @@ object FutureNeuralArchitectures {
             poincare[pair.tokenB] = projectToPoincareBall(pB)
         }
 
-        // 3) JEPA World Model Transition Training (z_t -> z_{t+1} latent EMA predictor)
+        // 3) Contrastive Anti-Collapse JEPA World Model Transition Training (z_t -> z_{t+1})
         var jepaHits = 0
         var jepaTested = 0
         var freeEnergySum = 0.0
+        val conceptKeys = cmsMid.keys.toList()
 
-        for ((currC, nextC, ts) in timelineTransitions.take(40)) {
+        for ((tIdx, transition) in timelineTransitions.take(48).withIndex()) {
+            val (currC, nextC, ts) = transition
             if (currC == nextC) continue
             val zCurr = cmsMid[currC] ?: continue
             val zNextTarget = cmsMid[nextC] ?: continue
@@ -365,35 +370,50 @@ object FutureNeuralArchitectures {
             freeEnergySum += predError
             jepaErrors[currC] = 0.6 * (jepaErrors[currC] ?: 0.5) + 0.4 * predError
 
-            // Update Liquid Time-Constant continuous activation
+            // Use TRUE event-to-event delta for STDP & continuous-time Liquid update (avoid wall-clock drift)
             val prevT = lastTsMap[currC] ?: ts
-            val delta = kotlin.math.abs(ts - prevT)
+            val observedSpanMs = kotlin.math.abs(ts - prevT)
+            val eventDeltaMs = eventDeltasMs.getOrNull(tIdx)?.coerceAtLeast(0L) ?: observedSpanMs
+            val stdpLagMs = if (eventDeltaMs in 1L..1_800_000L) eventDeltaMs else observedSpanMs
+
             liquid[currC] = liquidTimeUpdate(
                 prevState = liquid[currC] ?: 0.35,
                 inputSignal = 0.7 + 0.3 * predError,
-                deltaMs = delta,
+                deltaMs = observedSpanMs.coerceAtMost(7L * 86_400_000L),
                 ffGoodness = ffScores[currC] ?: 0.5
             )
             lastTsMap[currC] = max(prevT, ts)
 
-            // Latent JEPA matrix gradient step towards EMA target encoder (no pixel/word decoding!)
+            // Mined negative target prevents rank-1 JEPA collapse
+            val negConcept = if (conceptKeys.size >= 4) {
+                conceptKeys[(tIdx * 5 + passIndex * 3 + 2) % conceptKeys.size]
+                    .takeIf { it != currC && it != nextC }
+            } else null
+            val zWrong = negConcept?.let { cmsMid[it] }
+            val wrongSim = if (zWrong != null) {
+                FrontierNeuralTrainer.cosineSimilarity(predNext, zWrong).coerceIn(0.0, 1.0)
+            } else 0.0
+
+            // Contrastive JEPA gradient step: attract zNextTarget, repel mismatched zWrong, mild diagonal stability
             for (r in 0 until FUTURE_DIM) {
-                val errR = (zNextTarget[r] - predNext[r])
+                val repulse = if (zWrong != null) (0.28 * wrongSim * zWrong[r]) else 0.0
+                val errR = (zNextTarget[r] - predNext[r]) - repulse
                 val rowOff = r * FUTURE_DIM
                 for (col in 0 until FUTURE_DIM) {
+                    val diagReg = if (r == col) 0.002f else 0f
                     val deltaW = (JEPA_LR * errR * zCurr[col]).toFloat()
-                    jepaMatrix[rowOff + col] = (jepaMatrix[rowOff + col] * 0.996f + deltaW).coerceIn(-2.0f, 2.0f)
+                    jepaMatrix[rowOff + col] = (jepaMatrix[rowOff + col] * 0.995f + deltaW + diagReg).coerceIn(-2.0f, 2.0f)
                 }
             }
 
-            // STDP asymmetric causal plasticity link (currC -> nextC)
-            val stdpGain = computeStdpPotentiation(delta)
+            // STDP asymmetric causal plasticity link (currC -> nextC) weighted by TRUE event delta
+            val stdpGain = computeStdpPotentiation(stdpLagMs)
             brainDao.reinforceCausalTransition(
                 transitionKey = "$currC->$nextC",
                 fromConcept = currC,
                 toConcept = nextC,
                 deltaStdp = stdpGain,
-                deltaMs = delta,
+                deltaMs = stdpLagMs,
                 lastSeenMs = ts
             )
         }
@@ -434,8 +454,10 @@ object FutureNeuralArchitectures {
             brainDao.trimFutureCells(MAX_CELLS)
         }
 
-        val cumCorrect = prevWorld.jepaCorrect + jepaHits
-        val cumTotal = prevWorld.jepaTotal + jepaTested
+        val baseJepaCorrect = if (prevWorld.jepaTotal >= 250) prevWorld.jepaCorrect / 2 else prevWorld.jepaCorrect
+        val baseJepaTotal = if (prevWorld.jepaTotal >= 250) prevWorld.jepaTotal / 2 else prevWorld.jepaTotal
+        val cumCorrect = baseJepaCorrect + jepaHits
+        val cumTotal = baseJepaTotal + jepaTested
         val jepaAcc = if (cumTotal > 0) ((cumCorrect.toDouble() / cumTotal.toDouble()) * 100.0).toInt().coerceIn(0, 100) else 0
         val avgFE = if (jepaTested > 0) freeEnergySum / jepaTested else prevWorld.avgFreeEnergy
         val avgFF = if (ffTrials > 0) ffGoodSum / ffTrials else prevWorld.avgFfGoodness
@@ -454,12 +476,57 @@ object FutureNeuralArchitectures {
         )
         brainDao.saveWorldModelState(updatedWorld)
 
+        // 4b) Hippocampal Dream Consolidation: run 2-step JEPA latent rollouts & verify with Forward-Forward goodness
+        val dreamSeedConcepts = toSave
+            .sortedByDescending { it.liquidState }
+            .take(3)
+            .map { it.concept }
+        val dreamedChains = ArrayList<String>(3)
+        var dreamedBridgeCount = 0
+        for (seed in dreamSeedConcepts) {
+            val traj = predictMultiStepTrajectory(seed, toSave, updatedWorld, horizon = 2)
+            if (traj.isEmpty()) continue
+            val secondHop = traj.getOrNull(1)
+            val zSeed = cmsMid[seed]
+            val zHop = secondHop?.let { cmsMid[it.first] }
+            if (zSeed != null && zHop != null && secondHop != null) {
+                val good = forwardForwardGoodness(zSeed, zHop, ffWeights)
+                if (good >= 0.50) {
+                    val hopTarget = secondHop.first
+                    val existingAssocs = brainDao.getAssociationsFor(seed, limit = 16)
+                    val alreadyLinked = existingAssocs.any { it.tokenA == hopTarget || it.tokenB == hopTarget }
+                    if (!alreadyLinked) {
+                        val (lo, hi) = if (seed < hopTarget) seed to hopTarget else hopTarget to seed
+                        brainDao.reinforceAssociation(
+                            pairKey = "$lo|$hi",
+                            tokenA = lo,
+                            tokenB = hi,
+                            deltaWeight = (0.18 * good).coerceIn(0.05, 0.25),
+                            source = "DREAM_ROLLOUT",
+                            timeBucket = "Dream",
+                            lastSeen = nowMs
+                        )
+                        dreamedBridgeCount++
+                    }
+                }
+            }
+            val chainLabel = buildString {
+                append(seed)
+                for ((stepConcept, _) in traj) {
+                    append(" → ").append(stepConcept)
+                }
+            }
+            dreamedChains.add(chainLabel)
+        }
+
         return FuturePassMetrics(
             futureCellsCount = brainDao.countFutureCells(),
             jepaAccuracyPct = jepaAcc,
             avgFreeEnergy = avgFE,
             avgFfGoodness = avgFF,
-            curiosityTarget = curiosityConcept
+            curiosityTarget = curiosityConcept,
+            dreamedChains = dreamedChains,
+            dreamedLinksCount = dreamedBridgeCount
         )
     }
 

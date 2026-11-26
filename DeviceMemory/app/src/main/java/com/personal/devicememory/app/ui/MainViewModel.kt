@@ -34,6 +34,7 @@ import kotlinx.coroutines.launch
 enum class ActiveScreen {
     MAIN_CHAT,
     MOMENTS,
+    NEURAL_LAB,
     LEARNING_PERMISSION,
     UPDATES
 }
@@ -108,6 +109,16 @@ data class MainUiState(
     val episodesCount: Int = 0,
     val episodes: List<EpisodeEntity> = emptyList(),
     val voiceTamilMode: Boolean = false,
+    val avgSurprise: Double = 0.0,
+    val avgFreeEnergy: Double = 0.0,
+    val avgFfGoodness: Double = 0.0,
+    val causalTransitionsCount: Int = 0,
+    val weightExact: Double = 1.0,
+    val weightGraph: Double = 1.0,
+    val weightVector: Double = 1.0,
+    val weightTemporal: Double = 1.0,
+    val dreamedChains: List<String> = emptyList(),
+    val isBurstSimulating: Boolean = false,
     val topSimulatedTopics: List<String> = emptyList(),
 )
 
@@ -141,6 +152,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         curiosityTarget = snap.curiosityTarget,
                         topCausalChain = snap.topCausalChain,
                         episodesCount = snap.episodesCount,
+                        avgSurprise = snap.avgSurprise,
+                        avgFreeEnergy = snap.avgFreeEnergy,
+                        avgFfGoodness = snap.avgFfGoodness,
+                        causalTransitionsCount = snap.causalTransitionsCount,
+                        weightExact = snap.weightExact,
+                        weightGraph = snap.weightGraph,
+                        weightVector = snap.weightVector,
+                        weightTemporal = snap.weightTemporal,
+                        dreamedChains = snap.dreamedChains,
                         topSimulatedTopics = snap.topSimulatedConcepts
                     )
                 }
@@ -151,8 +171,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun navigateTo(screen: ActiveScreen) {
         _uiState.update { it.copy(activeScreen = screen) }
         when (screen) {
-            ActiveScreen.MOMENTS, ActiveScreen.LEARNING_PERMISSION, ActiveScreen.MAIN_CHAT -> loadState()
+            ActiveScreen.MOMENTS, ActiveScreen.NEURAL_LAB, ActiveScreen.LEARNING_PERMISSION, ActiveScreen.MAIN_CHAT -> loadState()
             ActiveScreen.UPDATES -> checkForUpdates()
+        }
+    }
+
+    fun runSimulationBurst(passes: Int = 5) {
+        val app = getApplication<Application>()
+        if (_uiState.value.isBurstSimulating) return
+        viewModelScope.launch {
+            _uiState.update { it.copy(isBurstSimulating = true) }
+            try {
+                LunaMemorySimulator.runSimulationBurst(app, passes = passes)
+                loadState()
+                showStatus("Completed $passes dream consolidation passes!")
+            } catch (e: Throwable) {
+                Log.w(TAG, "Burst simulation warning", e)
+            } finally {
+                _uiState.update { it.copy(isBurstSimulating = false) }
+            }
         }
     }
 
@@ -593,6 +630,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         topCausalChain = "",
                         episodesCount = 0,
                         episodes = emptyList(),
+                        avgSurprise = 0.0,
+                        avgFreeEnergy = 0.0,
+                        avgFfGoodness = 0.0,
+                        causalTransitionsCount = 0,
+                        weightExact = 1.0,
+                        weightGraph = 1.0,
+                        weightVector = 1.0,
+                        weightTemporal = 1.0,
+                        dreamedChains = emptyList(),
+                        isBurstSimulating = false,
                         topSimulatedTopics = emptyList(),
                         statusMessage = "Phone vault & offline AI wiped to 0"
                     )

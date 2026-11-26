@@ -112,6 +112,7 @@ class MainActivity : ComponentActivity() {
                         onToggleVoiceLanguage = { viewModel.toggleVoiceLanguage() },
                         onStitchEpisodesNow = { viewModel.stitchEpisodesNow() },
                         onAskAboutMoment = { viewModel.askAboutMoment(it) },
+                        onRunSimulationBurst = { viewModel.runSimulationBurst(5) },
                         onDismissStatus = { viewModel.clearStatus() },
                         onDeleteAll = { viewModel.deleteAllData() },
                         onShowDeleteConfirmation = { viewModel.showDeleteConfirmation() },

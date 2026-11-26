@@ -42,6 +42,12 @@ data class SimulationSnapshot(
     val causalTransitionsCount: Int = 0,
     val topCausalChain: String = "",
     val episodesCount: Int = 0,
+    val avgFfGoodness: Double = 0.0,
+    val weightExact: Double = 1.0,
+    val weightGraph: Double = 1.0,
+    val weightVector: Double = 1.0,
+    val weightTemporal: Double = 1.0,
+    val dreamedChains: List<String> = emptyList(),
     val topSimulatedConcepts: List<String> = emptyList()
 )
 
@@ -69,7 +75,7 @@ object LunaMemorySimulator {
         "vad", "hz", "kbps", "dominant", "mix", "ocr"
     )
 
-    private val CONCEPT_WORD_REGEX = Regex("""[\p{L}\p{M}]{2,32}""")
+    private val CONCEPT_WORD_REGEX = Regex("""spk_\d{1,3}|[\p{L}\p{M}]{2,32}""")
 
     private val simScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var simJob: Job? = null
@@ -123,6 +129,17 @@ object LunaMemorySimulator {
         }
     }
 
+    suspend fun runSimulationBurst(context: Context, passes: Int = 5): SimulationSnapshot {
+        val appContext = context.applicationContext
+        var latest = _snapshot.value
+        repeat(passes.coerceIn(1, 10)) {
+            latest = runSinglePass(appContext)
+            _snapshot.value = latest.copy(isSimulating = simJob?.isActive == true)
+            delay(40L)
+        }
+        return latest
+    }
+
     suspend fun refreshSnapshotFromDb(context: Context, running: Boolean = simJob?.isActive == true): SimulationSnapshot {
         val db = DeviceMemoryDatabase.getInstance(context)
         val brainDao = db.brainSimulationDao()
@@ -151,6 +168,12 @@ object LunaMemorySimulator {
             causalTransitionsCount = brainDao.countCausalTransitions(),
             topCausalChain = causalChain,
             episodesCount = brainDao.countEpisodes(),
+            avgFfGoodness = world?.avgFfGoodness ?: 0.0,
+            weightExact = policy?.weightExact ?: 1.0,
+            weightGraph = policy?.weightGraph ?: 1.0,
+            weightVector = policy?.weightVector ?: 1.0,
+            weightTemporal = policy?.weightTemporal ?: 1.0,
+            dreamedChains = _snapshot.value.dreamedChains,
             topSimulatedConcepts = top
         )
         _snapshot.value = snap
@@ -240,13 +263,20 @@ object LunaMemorySimulator {
         val offset = windowIdx * PASS_BATCH_SIZE
         val windowBatch = recordDao.getRecordsWindow(PASS_BATCH_SIZE, offset)
 
-        // Active Inference epistemic curiosity replay on alternating passes
+        // Active Inference epistemic curiosity + Priority High-Error Experience Replay
         val prevWorld = brainDao.getWorldModelState()
         val curiosityTerm = prevWorld?.curiosityTarget?.takeIf { it.isNotBlank() }
         val curiosityBatch = if (curiosityTerm != null && nextPass % 2 == 0) {
-            recordDao.searchByText(OnDeviceLunaBrain.escapeLike(curiosityTerm), limit = 30)
+            recordDao.searchByText(OnDeviceLunaBrain.escapeLike(curiosityTerm), limit = 25)
         } else emptyList()
-        val batch = (windowBatch + curiosityBatch)
+        val priorityReplayBatch = if (nextPass % 3 == 0) {
+            val highErrTerm = brainDao.getAllFutureCells(limit = 6)
+                .maxByOrNull { it.jepaPredError }
+                ?.concept
+                ?.takeIf { it.isNotBlank() && it != curiosityTerm }
+            if (highErrTerm != null) recordDao.searchByText(OnDeviceLunaBrain.escapeLike(highErrTerm), limit = 15) else emptyList()
+        } else emptyList()
+        val batch = (windowBatch + curiosityBatch + priorityReplayBatch)
             .distinctBy { it.id }
             .sortedBy { it.timestamp }
 
@@ -400,15 +430,35 @@ object LunaMemorySimulator {
             passIndex = nextPass
         )
 
-        // Build chronological timeline transitions (z_t -> z_{t+1}) for JEPA World Model + Liquid Time + Poincaré
+        // Build chronological causal transitions with TRUE event-to-event deltaMs + skip-1 multi-hop links
         val transitions = ArrayList<Triple<String, String, Long>>()
+        val transitionDeltasMs = ArrayList<Long>()
         for (i in 0 until prepared.size - 1) {
             val (recA, cA, _) = prepared[i]
             val (recB, cB, _) = prepared[i + 1]
             val headA = cA.firstOrNull() ?: continue
             val headB = cB.firstOrNull() ?: continue
-            if (headA != headB && abs(recB.timestamp - recA.timestamp) <= TEMPORAL_WINDOW_MS) {
+            val deltaAb = abs(recB.timestamp - recA.timestamp)
+            if (headA != headB && deltaAb <= TEMPORAL_WINDOW_MS) {
                 transitions.add(Triple(headA, headB, recB.timestamp))
+                transitionDeltasMs.add(deltaAb.coerceAtLeast(1_000L))
+                // Cross-sensor secondary trigger link
+                val secA = cA.getOrNull(1)
+                if (secA != null && secA != headB && recA.sourceType != recB.sourceType) {
+                    transitions.add(Triple(secA, headB, recB.timestamp))
+                    transitionDeltasMs.add(deltaAb.coerceAtLeast(1_000L))
+                }
+            }
+            // Skip-1 forward causal link across burst noise
+            val next2 = prepared.getOrNull(i + 2)
+            if (next2 != null) {
+                val (recC, cC, _) = next2
+                val headC = cC.firstOrNull()
+                val deltaAc = abs(recC.timestamp - recA.timestamp)
+                if (headC != null && headA != headC && headC != headB && deltaAc <= TEMPORAL_WINDOW_MS) {
+                    transitions.add(Triple(headA, headC, recC.timestamp))
+                    transitionDeltasMs.add(deltaAc.coerceAtLeast(2_000L))
+                }
             }
         }
         val conceptHitMap = conceptAccums.mapValues { it.value.hits }
@@ -417,7 +467,8 @@ object LunaMemorySimulator {
             pairs = pairSignals,
             timelineTransitions = transitions,
             conceptHits = conceptHitMap,
-            passIndex = nextPass
+            passIndex = nextPass,
+            eventDeltasMs = transitionDeltasMs
         )
 
         // Cross-modal spatio-temporal Episode Stitching ("Life Moments")
@@ -470,6 +521,12 @@ object LunaMemorySimulator {
             causalTransitionsCount = causalCount,
             topCausalChain = topChain,
             episodesCount = episodesCount,
+            avgFfGoodness = futureMetrics.avgFfGoodness,
+            weightExact = trainMetrics.policyState.weightExact,
+            weightGraph = trainMetrics.policyState.weightGraph,
+            weightVector = trainMetrics.policyState.weightVector,
+            weightTemporal = trainMetrics.policyState.weightTemporal,
+            dreamedChains = futureMetrics.dreamedChains,
             topSimulatedConcepts = topConceptsDisplay
         )
     }

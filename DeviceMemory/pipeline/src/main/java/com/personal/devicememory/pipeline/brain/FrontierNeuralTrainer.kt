@@ -222,9 +222,14 @@ object FrontierNeuralTrainer {
         }
         val docTotal = recordConceptsList.size.coerceAtLeast(1)
 
-        // 2. Positive Skip-Gram + Titans Momentum + Salience Weighting + Contrastive Negative Sampling
+        // 2. Positive Skip-Gram + Titans Momentum + Salience Weighting + Hard-Negative InfoNCE Sampling
+        val pairSet = HashSet<String>(pairs.size * 2)
+        for (p in pairs) {
+            val (a, b) = if (p.tokenA < p.tokenB) p.tokenA to p.tokenB else p.tokenB to p.tokenA
+            pairSet.add("$a|$b")
+        }
         val rngSeedBase = passIndex * 31 + 7
-        for ((idx, pair) in pairs.take(110).withIndex()) {
+        for ((idx, pair) in pairs.take(120).withIndex()) {
             val va = vecs[pair.tokenA] ?: continue
             val vb = vecs[pair.tokenB] ?: continue
 
@@ -243,17 +248,33 @@ object FrontierNeuralTrainer {
             applyTitansStep(pair.tokenA, snapB, posError, surprise)
             applyTitansStep(pair.tokenB, snapA, posError, surprise)
 
-            // Contrastive Negative Sampling (K = 3 non-matching concepts pushed apart)
+            // Contrastive Sampling (K = 2 modular negatives + 1 mined hard negative false-friend)
             if (distinctConcepts.size >= 5) {
-                for (negK in 1..3) {
+                fun isLinked(c1: String, c2: String): Boolean {
+                    val (lo, hi) = if (c1 < c2) c1 to c2 else c2 to c1
+                    return "$lo|$hi" in pairSet
+                }
+
+                for (negK in 1..2) {
                     val negIdx = (idx * 7 + negK * 13 + rngSeedBase) % distinctConcepts.size
                     val negConcept = distinctConcepts[negIdx]
-                    if (negConcept == pair.tokenA || negConcept == pair.tokenB) continue
+                    if (negConcept == pair.tokenA || negConcept == pair.tokenB || isLinked(pair.tokenA, negConcept)) continue
                     val vn = vecs[negConcept] ?: continue
                     val negScore = sigmoid(dot(snapA, vn) * 2.5)
                     if (negScore > 0.25) {
-                        val negGrad = -0.65 * negScore
-                        applyTitansStep(pair.tokenA, vn, negGrad, surprise * 0.5)
+                        applyTitansStep(pair.tokenA, vn, -0.65 * negScore, surprise * 0.5)
+                    }
+                }
+
+                // Mined Hard Negative: highest similarity concept to tokenA that did NOT co-occur
+                val hardNeg = findHardNegativeConcept(pair.tokenA, distinctConcepts, vecs, ::isLinked)
+                if (hardNeg != null) {
+                    val vnHard = vecs[hardNeg]
+                    if (vnHard != null) {
+                        val hardScore = sigmoid(dot(snapA, vnHard) * 2.5)
+                        if (hardScore > 0.30) {
+                            applyTitansStep(pair.tokenA, vnHard, -0.82 * hardScore, surprise * 0.65)
+                        }
                     }
                 }
             }
@@ -408,6 +429,10 @@ object FrontierNeuralTrainer {
         wVector /= avgW
         wTemp /= avgW
 
+        // Rolling bounded window (~250 recent trials) prevents stale Pass #1 saturation
+        val baseCorrect = if (prevPolicy.selfPlayTotal >= 250) prevPolicy.selfPlayCorrect / 2 else prevPolicy.selfPlayCorrect
+        val baseTotal = if (prevPolicy.selfPlayTotal >= 250) prevPolicy.selfPlayTotal / 2 else prevPolicy.selfPlayTotal
+
         return NeuralPolicyStateEntity(
             id = 1,
             weightExact = wExact,
@@ -415,11 +440,35 @@ object FrontierNeuralTrainer {
             weightVector = wVector,
             weightTemporal = wTemp,
             lastGrpoReward = groupMean,
-            selfPlayCorrect = prevPolicy.selfPlayCorrect + totalHits,
-            selfPlayTotal = prevPolicy.selfPlayTotal + trials,
+            selfPlayCorrect = baseCorrect + totalHits,
+            selfPlayTotal = baseTotal + trials,
             avgSurprise = avgSurprise,
             updatedAt = nowMs
         )
+    }
+
+    /**
+     * Mines the closest embedding neighbor that does NOT co-occur with [anchor], sharpening decision boundaries.
+     */
+    fun findHardNegativeConcept(
+        anchor: String,
+        candidates: List<String>,
+        vecs: Map<String, FloatArray>,
+        isCoOccurring: (String, String) -> Boolean
+    ): String? {
+        val va = vecs[anchor] ?: return null
+        var bestConcept: String? = null
+        var bestSim = Double.NEGATIVE_INFINITY
+        for (c in candidates) {
+            if (c == anchor || isCoOccurring(anchor, c)) continue
+            val vc = vecs[c] ?: continue
+            val sim = matryoshkaHybridSimilarity(va, vc)
+            if (sim > bestSim) {
+                bestSim = sim
+                bestConcept = c
+            }
+        }
+        return bestConcept
     }
 
     /**
