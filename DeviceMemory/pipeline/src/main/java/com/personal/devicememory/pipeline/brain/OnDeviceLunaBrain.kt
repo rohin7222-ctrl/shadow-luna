@@ -2,11 +2,13 @@ package com.personal.devicememory.pipeline.brain
 
 import android.content.Context
 import com.personal.devicememory.core.common.filter.SensitiveContentFilter
+import com.personal.devicememory.core.common.text.BilingualSemanticBridge
 import com.personal.devicememory.core.common.text.TemporalAnchorExtractor
 import com.personal.devicememory.core.common.util.TimestampUtil
 import com.personal.devicememory.core.database.DeviceMemoryDatabase
 import com.personal.devicememory.core.database.entity.BrainInsightEntity
 import com.personal.devicememory.core.database.entity.CollectedRecordEntity
+import com.personal.devicememory.core.database.entity.EpisodeEntity
 import com.personal.devicememory.core.database.entity.NeuralPolicyStateEntity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -31,6 +33,8 @@ data class OfflineLunaReply(
     val jepaAccuracyPct: Int = 0,
     val curiosityTarget: String = "",
     val causalNextChain: String = "",
+    val anchorConcept: String? = null,
+    val primaryStrategy: String = "EXACT",
     val response: String
 )
 
@@ -290,6 +294,10 @@ object OnDeviceLunaBrain {
             }
         }
 
+        // Bilingual Tamil <-> English synonym bridge (strictly linguistic; zero pre-built knowledge)
+        val bilingualExpansions = BilingualSemanticBridge.expandBilingualSynonyms(expandedTerms)
+        expandedTerms.addAll(bilingualExpansions)
+
         // Gather matching insights & 1-hop graph neighbors
         val matchedInsights = LinkedHashMap<String, BrainInsightEntity>()
         val graphNeighbors = LinkedHashSet<String>()
@@ -358,7 +366,12 @@ object OnDeviceLunaBrain {
         for (tok in expandedTerms) {
             val hits = recordDao.searchByText(escapeLike(tok), limit = 14)
             val specificity = (1.0 + ln(1.0 + 14.0 / hits.size.coerceAtLeast(1))).coerceIn(0.8, 2.2)
-            val baseW = (if (tok in meaningfulTokens) 4.0 else 2.2) * policy.weightExact * specificity
+            val roleMult = when {
+                tok in meaningfulTokens -> 4.0
+                tok in bilingualExpansions -> 2.1
+                else -> 2.4
+            }
+            val baseW = roleMult * policy.weightExact * specificity
             val temporalBoost = if (intent == QueryIntent.TEMPORAL) policy.weightTemporal * 0.7 else 0.0
             for (rec in hits) {
                 addScore(rec, baseW + temporalBoost)
@@ -393,6 +406,19 @@ object OnDeviceLunaBrain {
             }
         }
 
+        val matchedEpisodesMap = LinkedHashMap<String, EpisodeEntity>()
+        if (queryWindow != null) {
+            for (ep in brainDao.getEpisodesInWindow(queryWindow.startMillis, queryWindow.endMillis, limit = 4)) {
+                matchedEpisodesMap[ep.episodeId] = ep
+            }
+        }
+        for (tok in expandedTerms.take(6)) {
+            for (ep in brainDao.searchEpisodes(escapeLike(tok), limit = 3)) {
+                matchedEpisodesMap[ep.episodeId] = ep
+            }
+        }
+        val matchedEpisodes = matchedEpisodesMap.values.sortedByDescending { it.endMillis }.take(3)
+
         val ranked = deduplicateEvidence(
             scored.values
                 .sortedWith(
@@ -415,7 +441,7 @@ object OnDeviceLunaBrain {
             causalNext.take(3).joinToString(" → ") { "${it.toConcept} (×${it.transitionCount})" }
         } else ""
 
-        if (ranked.isEmpty() && matchedInsights.isEmpty() && matchedTokens.isEmpty() && tttSemanticNeighbors.isEmpty() && causalNext.isEmpty()) {
+        if (ranked.isEmpty() && matchedInsights.isEmpty() && matchedTokens.isEmpty() && tttSemanticNeighbors.isEmpty() && causalNext.isEmpty() && matchedEpisodes.isEmpty()) {
             val realTopics = topInsights.take(4).joinToString(", ") { it.concept }
             return@withContext OfflineLunaReply(
                 query = query,
@@ -473,6 +499,13 @@ object OnDeviceLunaBrain {
             if (matchedTokens.isNotEmpty()) {
                 appendLine("Key Signals: ${matchedTokens.joinToString(", ") { "${it.token} (×${it.frequency})" }}")
             }
+            if (matchedEpisodes.isNotEmpty()) {
+                appendLine()
+                appendLine("Life Episodes:")
+                for (ep in matchedEpisodes.take(2)) {
+                    appendLine("• ${ep.narrativeSummary}")
+                }
+            }
             if (ranked.isNotEmpty()) {
                 appendLine()
                 appendLine("Top Evidence:")
@@ -482,6 +515,13 @@ object OnDeviceLunaBrain {
                 }
             }
         }.trimEnd()
+
+        val primaryStrategy = when {
+            queryWindow != null -> "TEMPORAL"
+            tttSemanticNeighbors.isNotEmpty() -> "VECTOR"
+            graphNeighbors.isNotEmpty() -> "GRAPH"
+            else -> "EXACT"
+        }
 
         OfflineLunaReply(
             query = query,
@@ -495,8 +535,38 @@ object OnDeviceLunaBrain {
             jepaAccuracyPct = jepaAcc,
             curiosityTarget = curiosity,
             causalNextChain = causalChainStr,
+            anchorConcept = anchorTerm,
+            primaryStrategy = primaryStrategy,
             response = response
         )
+    }
+
+    /** Live Human-in-the-Loop RLHF: adapts GRPO policy & STDP causal strength directly from 👍 / 👎 clicks. */
+    suspend fun recordChatFeedback(
+        context: Context,
+        anchorConcept: String?,
+        strategy: String,
+        isPositive: Boolean
+    ) = withContext(Dispatchers.IO) {
+        val db = DeviceMemoryDatabase.getInstance(context)
+        val brainDao = db.brainSimulationDao()
+        val prev = brainDao.getPolicyState() ?: NeuralPolicyStateEntity()
+        val delta = if (isPositive) 0.14 else -0.10
+
+        val updated = prev.copy(
+            weightExact = (prev.weightExact + if (strategy == "EXACT") delta else 0.0).coerceIn(0.4, 3.5),
+            weightGraph = (prev.weightGraph + if (strategy == "GRAPH") delta else 0.0).coerceIn(0.4, 3.5),
+            weightVector = (prev.weightVector + if (strategy == "VECTOR") delta else 0.0).coerceIn(0.4, 3.5),
+            weightTemporal = (prev.weightTemporal + if (strategy == "TEMPORAL") delta else 0.0).coerceIn(0.4, 3.5),
+            lastGrpoReward = if (isPositive) 1.0 else -0.6,
+            selfPlayCorrect = prev.selfPlayCorrect + if (isPositive) 1 else 0,
+            selfPlayTotal = prev.selfPlayTotal + 1,
+            updatedAt = System.currentTimeMillis()
+        )
+        brainDao.savePolicyState(updated)
+        if (!anchorConcept.isNullOrBlank()) {
+            brainDao.scaleCausalWeight(anchorConcept, if (isPositive) 1.15 else 0.70)
+        }
     }
 
     private fun fmt(v: Double): String = String.format(Locale.US, "%.2f", v)

@@ -90,6 +90,7 @@ class MainActivity : ComponentActivity() {
                             viewModel.toggleSource(sourceType, enabled)
                         },
                         onCollectOfflineNow = { viewModel.collectOfflineNow() },
+                        onChatFeedback = { msgId, positive -> viewModel.submitChatFeedback(msgId, positive) },
                         onDeleteAll = { viewModel.deleteAllData() },
                         onShowDeleteConfirmation = { viewModel.showDeleteConfirmation() },
                         onDismissDeleteConfirmation = { viewModel.dismissDeleteConfirmation() },

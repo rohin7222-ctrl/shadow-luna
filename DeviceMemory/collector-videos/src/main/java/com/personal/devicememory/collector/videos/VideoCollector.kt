@@ -8,6 +8,7 @@ import android.os.Build
 import android.provider.MediaStore
 import android.util.Log
 import androidx.core.content.ContextCompat
+import com.personal.devicememory.collector.audio.AcousticSpeakerClusterer
 import com.personal.devicememory.core.common.collector.Collector
 import com.personal.devicememory.core.common.model.CollectedRecord
 
@@ -143,7 +144,13 @@ class VideoCollector(
                 }
             } else null
 
-            records.add(VideoMapper.map(item.copy(visual = fused?.visual, audio = fused?.audio)))
+            val speaker = fused?.audio?.let { a ->
+                try {
+                    AcousticSpeakerClusterer.identifyAndPersist(context, a.mfccSignature, a.speechRatio)
+                } catch (_: Throwable) { null }
+            }
+
+            records.add(VideoMapper.map(item.copy(visual = fused?.visual, audio = fused?.audio, speakerCluster = speaker)))
         }
 
         Log.i(TAG, "Collected ${records.size} video records (V-JEPA+AV analyzed=${items.size - deepStartIndex})")

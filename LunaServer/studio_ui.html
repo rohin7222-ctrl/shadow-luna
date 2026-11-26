@@ -791,6 +791,10 @@
                     <span>Memory &amp; Tokens</span>
                     <span class="nav-badge" id="nav-tok-badge">0</span>
                 </button>
+                <button class="nav-btn" onclick="switchView('graph', this)">
+                    <span>🕸️</span>
+                    <span>Knowledge Graph</span>
+                </button>
                 <button class="nav-btn" onclick="switchView('connect', this)">
                     <span>📱</span>
                     <span>Mobile Sync</span>
@@ -896,10 +900,41 @@
 
                         <div class="glass-section">
                             <div class="section-head">
+                                <span class="section-title">Life Episodes (Spatio-Temporal Moments)</span>
+                                <span style="font-size:0.8rem;color:var(--text-muted);" id="ep-summary">Cross-modal timeline clusters</span>
+                            </div>
+                            <div class="memory-cards" id="episode-cards"></div>
+                        </div>
+
+                        <div class="glass-section">
+                            <div class="section-head">
                                 <span class="section-title">Synced Timeline</span>
                                 <span style="font-size:0.8rem;color:var(--text-muted);" id="session-summary">Stored privately on this laptop</span>
                             </div>
                             <div class="memory-cards" id="memory-cards"></div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- View 4: Interactive 2D Force-Directed Knowledge Graph -->
+            <section class="view" id="view-graph">
+                <div class="page-scroll">
+                    <div class="page-inner">
+                        <div class="page-head">
+                            <h2>Interactive Knowledge Graph</h2>
+                            <span style="font-size:0.82rem;color:var(--text-muted);" id="kg-meta">Drag or click nodes to inspect links</span>
+                        </div>
+                        <div class="glass-section" style="padding:12px;">
+                            <div style="display:flex;gap:12px;flex-wrap:wrap;font-size:0.78rem;margin-bottom:8px;align-items:center;">
+                                <span style="color:#a78bfa;">● PERSON</span>
+                                <span style="color:#38bdf8;">● APP</span>
+                                <span style="color:#34d399;">● AV_SCENE</span>
+                                <span style="color:#fbbf24;">● MEDIA</span>
+                                <span style="color:#f472b6;">● EPISODE</span>
+                                <span style="margin-left:auto;color:var(--cyan);" id="kg-selected">Click any node...</span>
+                            </div>
+                            <canvas id="kg-canvas" width="900" height="440" style="width:100%;height:420px;background:#090913;border-radius:14px;border:1px solid var(--border);display:block;cursor:grab;"></canvas>
                         </div>
                     </div>
                 </div>
@@ -986,7 +1021,7 @@
     </dialog>
 
     <script>
-        let latestSnapshot = { memories: [], tokens: [], nodes: [], sessions: [], transitions: [], memories_count: 0, tokens_count: 0, nodes_count: 0 };
+        let latestSnapshot = { memories: [], tokens: [], nodes: [], edges: [], episodes: [], sessions: [], transitions: [], memories_count: 0, tokens_count: 0, nodes_count: 0 };
         let currentPhase = 'IDLE';
         let completedTimer = null;
         let settingsCloseTimer = null;
@@ -994,7 +1029,9 @@
         let pollInFlight = false;
         let lastTokenSig = '';
         let lastTransSig = '';
+        let lastEpisodeSig = '';
         let lastMemSig = '';
+        let lastGraphSig = '';
         let fwStatusPinnedUntil = 0;
 
         function openModal(id) {
@@ -1014,6 +1051,7 @@
             document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
             document.getElementById('view-' + name).classList.add('active');
             if (btn) btn.classList.add('active');
+            if (name === 'graph') renderKnowledgeGraph(true);
         }
 
         function createEl(tag, cls, text) {
@@ -1043,6 +1081,14 @@
             } catch (_) {}
         }
 
+        async function sendChatFeedback(anchor, isPositive, barEl) {
+            try {
+                await apiCall('/ctl/feedback', 'POST', { anchor_concept: anchor || '', is_positive: isPositive });
+                barEl.textContent = isPositive ? '✓ Reinforced' : '✓ Adjusted down';
+                barEl.style.color = isPositive ? '#34d399' : '#94a3b8';
+            } catch (_) {}
+        }
+
         async function sendChat() {
             const input = document.getElementById('chat-input');
             const q = input.value.trim();
@@ -1061,12 +1107,212 @@
                 const data = await apiCall('/ctl/chat', 'POST', { query: q });
                 const reply = data.response || data.error || 'No response received from engine.';
                 const cls = data.learned ? 'msg luna learned' : 'msg luna';
-                container.appendChild(createEl('div', cls, reply));
+                const bubble = createEl('div', cls, reply);
+                if (data.learned) {
+                    const bar = createEl('div', '');
+                    bar.style.display = 'flex';
+                    bar.style.gap = '8px';
+                    bar.style.marginTop = '8px';
+                    bar.style.fontSize = '0.75rem';
+                    const bUp = createEl('button', 'btn-soft', '👍 Helpful');
+                    bUp.type = 'button';
+                    bUp.style.padding = '3px 10px';
+                    bUp.style.fontSize = '0.75rem';
+                    bUp.onclick = () => sendChatFeedback(data.anchor_concept, true, bar);
+                    const bDn = createEl('button', 'btn-soft', '👎 Fix');
+                    bDn.type = 'button';
+                    bDn.style.padding = '3px 10px';
+                    bDn.style.fontSize = '0.75rem';
+                    bDn.onclick = () => sendChatFeedback(data.anchor_concept, false, bar);
+                    bar.appendChild(bUp);
+                    bar.appendChild(bDn);
+                    bubble.appendChild(bar);
+                }
+                container.appendChild(bubble);
             } catch (e) {
                 container.appendChild(createEl('div', 'msg luna', 'Background engine is paused or busy. Turn it on at bottom-left.'));
             }
             scroller.scrollTop = scroller.scrollHeight;
         }
+
+        function renderEpisodes() {
+            const grid = document.getElementById('episode-cards');
+            if (!grid) return;
+            const eps = latestSnapshot.episodes || [];
+            const sig = eps.map(e => `${e.episode_id}:${e.record_count}`).join(',');
+            if (sig === lastEpisodeSig) return;
+            lastEpisodeSig = sig;
+            grid.replaceChildren();
+            if (eps.length === 0) {
+                const p = createEl('p', '', 'No stitched episodes synced yet.');
+                p.style.color = 'var(--text-muted)';
+                p.style.fontSize = '0.88rem';
+                grid.appendChild(p);
+                return;
+            }
+            eps.forEach(ep => {
+                const card = createEl('div', 'mem-card');
+                const top = createEl('div', 'mem-top');
+                top.appendChild(createEl('span', 'mem-tag', ep.dominant_sources || 'MOMENT'));
+                top.appendChild(createEl('span', '', `${ep.record_count} events`));
+                card.appendChild(top);
+                card.appendChild(createEl('div', 'mem-body', ep.narrative_summary || ep.title_label));
+                grid.appendChild(card);
+            });
+        }
+
+        // Interactive 2D Force-Directed Knowledge Graph Renderer
+        let kgSimNodes = [];
+        let kgEdges = [];
+        let kgDragIdx = -1;
+        function renderKnowledgeGraph(forceReset = false) {
+            const canvas = document.getElementById('kg-canvas');
+            if (!canvas) return;
+            const rawNodes = (latestSnapshot.nodes || []).slice(0, 36);
+            const rawEdges = (latestSnapshot.edges || []).slice(0, 60);
+            const sig = rawNodes.map(n => n.id + ':' + n.mention_count).join(',') + '|' + rawEdges.length;
+            if (!forceReset && sig === lastGraphSig) return;
+            lastGraphSig = sig;
+
+            const w = canvas.width;
+            const h = canvas.height;
+            const oldPos = new Map(kgSimNodes.map(n => [n.id, n]));
+            kgSimNodes = rawNodes.map((n, idx) => {
+                const prev = oldPos.get(n.id);
+                const ang = (idx / Math.max(1, rawNodes.length)) * Math.PI * 2;
+                return {
+                    id: n.id,
+                    label: n.label || n.id,
+                    type: n.entity_type || 'TOPIC',
+                    mentions: n.mention_count || 1,
+                    x: prev ? prev.x : w / 2 + Math.cos(ang) * (90 + (idx % 3) * 55),
+                    y: prev ? prev.y : h / 2 + Math.sin(ang) * (70 + (idx % 3) * 42),
+                    vx: 0, vy: 0
+                };
+            });
+            const nodeMap = new Map(kgSimNodes.map((n, i) => [n.id, i]));
+            kgEdges = [];
+            rawEdges.forEach(e => {
+                const si = nodeMap.get(e.source_id);
+                const ti = nodeMap.get(e.target_id);
+                if (si !== undefined && ti !== undefined) kgEdges.push([si, ti, e.relation || 'LINK']);
+            });
+            (latestSnapshot.transitions || []).slice(0, 12).forEach(tr => {
+                const findConcept = (c) => kgSimNodes.findIndex(n => (n.label || '').toLowerCase() === c.toLowerCase());
+                const a = findConcept(tr.from_concept);
+                const b = findConcept(tr.to_concept);
+                if (a >= 0 && b >= 0 && a !== b) kgEdges.push([a, b, 'STDP']);
+            });
+
+            // 45 fast relaxation ticks
+            for (let step = 0; step < 45; step++) {
+                for (let i = 0; i < kgSimNodes.length; i++) {
+                    for (let j = i + 1; j < kgSimNodes.length; j++) {
+                        const a = kgSimNodes[i], b = kgSimNodes[j];
+                        let dx = b.x - a.x, dy = b.y - a.y;
+                        let d2 = dx * dx + dy * dy + 0.01;
+                        let rep = 1600 / d2;
+                        a.vx -= dx * rep; a.vy -= dy * rep;
+                        b.vx += dx * rep; b.vy += dy * rep;
+                    }
+                }
+                kgEdges.forEach(([si, ti]) => {
+                    const a = kgSimNodes[si], b = kgSimNodes[ti];
+                    let dx = b.x - a.x, dy = b.y - a.y;
+                    a.vx += dx * 0.015; a.vy += dy * 0.015;
+                    b.vx -= dx * 0.015; b.vy -= dy * 0.015;
+                });
+                kgSimNodes.forEach(n => {
+                    n.vx += (w / 2 - n.x) * 0.008;
+                    n.vy += (h / 2 - n.y) * 0.008;
+                    n.x = Math.max(36, Math.min(w - 36, n.x + n.vx * 0.12));
+                    n.y = Math.max(28, Math.min(h - 28, n.y + n.vy * 0.12));
+                    n.vx *= 0.6; n.vy *= 0.6;
+                });
+            }
+            drawKnowledgeGraph();
+        }
+
+        function drawKnowledgeGraph() {
+            const canvas = document.getElementById('kg-canvas');
+            if (!canvas) return;
+            const ctx = canvas.getContext('2d');
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            if (kgSimNodes.length === 0) {
+                ctx.fillStyle = '#7f809e';
+                ctx.font = '14px system-ui';
+                ctx.textAlign = 'center';
+                ctx.fillText('0 Graph Entities yet — sync phone memories to render the live Graph.', canvas.width / 2, canvas.height / 2);
+                return;
+            }
+
+            const colorOf = (t) => {
+                if (t === 'PERSON') return '#a78bfa';
+                if (t === 'APP') return '#38bdf8';
+                if (t === 'AV_SCENE') return '#34d399';
+                if (t === 'EPISODE') return '#f472b6';
+                return '#fbbf24';
+            };
+
+            kgEdges.forEach(([si, ti, rel]) => {
+                const a = kgSimNodes[si], b = kgSimNodes[ti];
+                ctx.strokeStyle = rel === 'STDP' ? 'rgba(56, 189, 248, 0.38)' : 'rgba(167, 139, 250, 0.25)';
+                ctx.lineWidth = rel === 'STDP' ? 1.8 : 1.1;
+                ctx.beginPath();
+                ctx.moveTo(a.x, a.y);
+                ctx.lineTo(b.x, b.y);
+                ctx.stroke();
+            });
+
+            kgSimNodes.forEach(n => {
+                const r = Math.min(20, 8 + Math.sqrt(n.mentions) * 2.2);
+                const col = colorOf(n.type);
+                ctx.fillStyle = col;
+                ctx.beginPath();
+                ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.strokeStyle = '#090913';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+
+                ctx.fillStyle = '#f4f4fb';
+                ctx.font = '11px system-ui';
+                ctx.textAlign = 'center';
+                const lbl = n.label.length > 18 ? n.label.slice(0, 17) + '…' : n.label;
+                ctx.fillText(lbl, n.x, n.y + r + 13);
+            });
+        }
+
+        (function initGraphMouse() {
+            const canvas = document.getElementById('kg-canvas');
+            if (!canvas) return;
+            const pick = (ev) => {
+                const rect = canvas.getBoundingClientRect();
+                const sx = canvas.width / rect.width;
+                const sy = canvas.height / rect.height;
+                const mx = (ev.clientX - rect.left) * sx;
+                const my = (ev.clientY - rect.top) * sy;
+                return { mx, my, idx: kgSimNodes.findIndex(n => Math.hypot(n.x - mx, n.y - my) <= 22) };
+            };
+            canvas.addEventListener('mousedown', (ev) => {
+                const { idx } = pick(ev);
+                if (idx >= 0) {
+                    kgDragIdx = idx;
+                    const n = kgSimNodes[idx];
+                    const sel = document.getElementById('kg-selected');
+                    if (sel) sel.textContent = `${n.label} [${n.type}] • ×${n.mentions} mentions`;
+                }
+            });
+            window.addEventListener('mousemove', (ev) => {
+                if (kgDragIdx < 0) return;
+                const { mx, my } = pick(ev);
+                kgSimNodes[kgDragIdx].x = Math.max(24, Math.min(canvas.width - 24, mx));
+                kgSimNodes[kgDragIdx].y = Math.max(24, Math.min(canvas.height - 24, my));
+                drawKnowledgeGraph();
+            });
+            window.addEventListener('mouseup', () => { kgDragIdx = -1; });
+        })();
 
         function renderTokens() {
             const q = (document.getElementById('token-search').value || '').trim().toLowerCase();
@@ -1173,7 +1419,7 @@
         }
 
         async function triggerConnectToApp() {
-            const connectNavBtn = document.querySelectorAll('.nav-btn')[2];
+            const connectNavBtn = document.querySelectorAll('.nav-btn')[3];
             switchView('connect', connectNavBtn);
             try {
                 await apiCall('/ctl/connect-app', 'POST', {});
@@ -1201,6 +1447,8 @@
                 lastTokenSig = '';
                 lastTransSig = '';
                 lastMemSig = '';
+                lastEpisodeSig = '';
+                lastGraphSig = '';
                 await pollAll();
             } catch (_) {}
         }
@@ -1377,7 +1625,9 @@
 
                 renderTokens();
                 renderTransitions();
+                renderEpisodes();
                 renderMemories();
+                renderKnowledgeGraph();
                 updateHandshakeUi(st.handshake, st.lan_url);
             } catch (_) {
             } finally {

@@ -137,7 +137,13 @@ class AudioCollector(
                 }
             } else null
 
-            records.add(AudioMapper.map(item.copy(analysis = analysis)))
+            val speaker = if (analysis != null) {
+                try {
+                    AcousticSpeakerClusterer.identifyAndPersist(context, analysis.mfccSignature, analysis.speechRatio)
+                } catch (_: Throwable) { null }
+            } else null
+
+            records.add(AudioMapper.map(item.copy(analysis = analysis, speakerCluster = speaker)))
         }
 
         Log.i(TAG, "Collected ${records.size} audio records (spectral analyzed=${items.size - deepStartIndex})")

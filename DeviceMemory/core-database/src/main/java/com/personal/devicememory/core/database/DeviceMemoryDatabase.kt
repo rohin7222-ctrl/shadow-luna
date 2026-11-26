@@ -17,6 +17,7 @@ import com.personal.devicememory.core.database.entity.BrainInsightEntity
 import com.personal.devicememory.core.database.entity.CausalTransitionEntity
 import com.personal.devicememory.core.database.entity.CollectedRecordEntity
 import com.personal.devicememory.core.database.entity.CollectorConfigEntity
+import com.personal.devicememory.core.database.entity.EpisodeEntity
 import com.personal.devicememory.core.database.entity.FutureMemoryCellEntity
 import com.personal.devicememory.core.database.entity.LearnedAssociationEntity
 import com.personal.devicememory.core.database.entity.LearnedTokenEntity
@@ -40,9 +41,10 @@ import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
         NeuralPolicyStateEntity::class,
         FutureMemoryCellEntity::class,
         WorldModelStateEntity::class,
-        CausalTransitionEntity::class
+        CausalTransitionEntity::class,
+        EpisodeEntity::class
     ],
-    version = 6,
+    version = 7,
     exportSchema = false
 )
 abstract class DeviceMemoryDatabase : RoomDatabase() {
@@ -217,6 +219,30 @@ abstract class DeviceMemoryDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `memory_episodes` (
+                        `episode_id` TEXT NOT NULL,
+                        `title_label` TEXT NOT NULL,
+                        `start_millis` INTEGER NOT NULL,
+                        `end_millis` INTEGER NOT NULL,
+                        `primary_place` TEXT NOT NULL,
+                        `dominant_sources` TEXT NOT NULL,
+                        `key_concepts` TEXT NOT NULL,
+                        `record_count` INTEGER NOT NULL,
+                        `narrative_summary` TEXT NOT NULL,
+                        `updated_at` INTEGER NOT NULL,
+                        PRIMARY KEY(`episode_id`)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_memory_episodes_end_millis` ON `memory_episodes` (`end_millis`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_memory_episodes_key_concepts` ON `memory_episodes` (`key_concepts`)")
+            }
+        }
+
         init {
             try {
                 System.loadLibrary("sqlcipher")
@@ -257,7 +283,7 @@ abstract class DeviceMemoryDatabase : RoomDatabase() {
                 DB_NAME
             )
                 .openHelperFactory(factory)
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
                 .fallbackToDestructiveMigration()
                 .build()
         }

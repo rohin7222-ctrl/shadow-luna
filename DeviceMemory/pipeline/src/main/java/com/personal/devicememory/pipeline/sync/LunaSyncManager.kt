@@ -5,6 +5,8 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.util.Log
+import com.personal.devicememory.core.common.crypto.DerivedSyncKeys
+import com.personal.devicememory.core.common.crypto.SyncCryptoUtil
 import com.personal.devicememory.core.common.filter.SensitiveContentFilter
 import com.personal.devicememory.core.database.DeviceMemoryDatabase
 import kotlinx.coroutines.CompletableDeferred
@@ -49,10 +51,55 @@ data class LunaTokenDto(
 )
 
 @Serializable
+data class LunaVectorDto(
+    val concept: String,
+    val vector_csv: String,
+    val fisher_importance: Double = 1.0,
+    val surprise_score: Double = 0.2
+)
+
+@Serializable
+data class LunaTransitionDto(
+    val from_concept: String,
+    val to_concept: String,
+    val stdp_weight: Double,
+    val transition_count: Int
+)
+
+@Serializable
+data class LunaEpisodeDto(
+    val episode_id: String,
+    val title_label: String,
+    val start_millis: Long,
+    val end_millis: Long,
+    val primary_place: String = "",
+    val dominant_sources: String = "",
+    val key_concepts: String = "",
+    val record_count: Int = 1,
+    val narrative_summary: String
+)
+
+@Serializable
 data class LunaSyncPayloadDto(
-    val client_version: String = "Shadow-0.3.1",
+    val client_version: String = "Shadow-0.8.0",
     val records: List<LunaSyncRecordDto>,
-    val tokens: List<LunaTokenDto> = emptyList()
+    val tokens: List<LunaTokenDto> = emptyList(),
+    val vectors: List<LunaVectorDto> = emptyList(),
+    val transitions: List<LunaTransitionDto> = emptyList(),
+    val episodes: List<LunaEpisodeDto> = emptyList()
+)
+
+@Serializable
+data class EncryptedSyncWrapperDto(
+    val encrypted_payload: String,
+    val iv: String,
+    val hmac_tag: String,
+    val mobile_pubkey: String
+)
+
+@Serializable
+data class HandshakeMobileReadyDto(
+    val mobile_pubkey: String? = null
 )
 
 @Serializable
@@ -71,7 +118,9 @@ data class HandshakeStatusDto(
     val total_records: Int = 0,
     val received_records: Int = 0,
     val received_tokens: Int = 0,
-    val last_message: String = ""
+    val last_message: String = "",
+    val laptop_pubkey: String? = null,
+    val session_salt: String? = null
 )
 
 @Serializable
@@ -106,6 +155,36 @@ object LunaSyncManager {
     private const val BATCH_SIZE = 50
     private const val DISCOVERY_UDP_PORT = 8800
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
+
+    @Volatile private var activeKeyPair: java.security.KeyPair? = null
+    @Volatile private var activeMobilePubB64: String? = null
+    @Volatile private var activeE2eeKeys: DerivedSyncKeys? = null
+
+    private fun ensureSessionKeys() {
+        if (activeKeyPair == null) {
+            try {
+                val kp = SyncCryptoUtil.generateEphemeralKeyPair()
+                activeKeyPair = kp
+                activeMobilePubB64 = SyncCryptoUtil.encodePublicKeyB64(kp.public)
+            } catch (e: Throwable) {
+                Log.w(TAG, "ECDH keypair generation unavailable: ${e.message}")
+            }
+        }
+    }
+
+    private fun maybeDerivePeerKeys(dto: HandshakeStatusDto) {
+        val kp = activeKeyPair ?: return
+        val peerB64 = dto.laptop_pubkey?.takeIf { it.isNotBlank() } ?: return
+        val salt = dto.session_salt?.takeIf { it.isNotBlank() } ?: return
+        try {
+            val peerPub = SyncCryptoUtil.decodePublicKeyB64(peerB64)
+            val shared = SyncCryptoUtil.computeSharedSecret(kp.private, peerPub)
+            activeE2eeKeys = SyncCryptoUtil.deriveSessionKeys(shared, salt)
+        } catch (e: Throwable) {
+            Log.w(TAG, "ECDH session derivation skipped: ${e.message}")
+            activeE2eeKeys = null
+        }
+    }
 
     @Suppress("DEPRECATION")
     private fun findWifiNetwork(context: Context): Network? {
@@ -306,15 +385,22 @@ object LunaSyncManager {
         if (!LunaServerConfig.isLocalPrivateUrl(serverUrl)) {
             return@withContext Result.failure(IllegalArgumentException("Non-local URL blocked"))
         }
+        ensureSessionKeys()
         try {
-            val raw = requestJson(context, "$serverUrl/api/handshake/mobile-ready", "POST", "{}")
-            Result.success(json.decodeFromString<HandshakeStatusDto>(raw))
+            val reqBody = json.encodeToString(HandshakeMobileReadyDto(mobile_pubkey = activeMobilePubB64))
+            val raw = requestJson(context, "$serverUrl/api/handshake/mobile-ready", "POST", reqBody)
+            val dto = json.decodeFromString<HandshakeStatusDto>(raw)
+            maybeDerivePeerKeys(dto)
+            Result.success(dto)
         } catch (e: Throwable) {
             Result.failure(e)
         }
     }
 
     suspend fun cancelHandshake(context: Context) = withContext(Dispatchers.IO) {
+        activeKeyPair = null
+        activeMobilePubB64 = null
+        activeE2eeKeys = null
         val serverUrl = LunaServerConfig.getServerUrl(context)
         if (!LunaServerConfig.isLocalPrivateUrl(serverUrl)) return@withContext
         try {
@@ -334,15 +420,50 @@ object LunaSyncManager {
         val db = DeviceMemoryDatabase.getInstance(context)
         val recordDao = db.collectedRecordDao()
         val tokenDao = db.learnedTokenDao()
+        val brainDao = db.brainSimulationDao()
 
         var uploaded = 0
         var tokensSent = 0
-        var tokensIncluded = false
+        var neuralIncluded = false
+
+        fun maybeEncryptPayload(rawJson: String): String {
+            val keys = activeE2eeKeys
+            val pub = activeMobilePubB64
+            if (keys == null || pub.isNullOrBlank()) return rawJson
+            val env = SyncCryptoUtil.encrypt(rawJson.toByteArray(Charsets.UTF_8), keys)
+            return json.encodeToString(
+                EncryptedSyncWrapperDto(
+                    encrypted_payload = env.cipherTextB64,
+                    iv = env.ivB64,
+                    hmac_tag = env.hmacB64,
+                    mobile_pubkey = pub
+                )
+            )
+        }
 
         try {
             val totalUnsynced = recordDao.countUnsynced()
             val allTokens = tokenDao.getTopTokens(2000).map {
                 LunaTokenDto(it.token, it.frequency, it.lastSource, it.lastSeen)
+            }
+            val syncVectors = brainDao.getAllVectors(400).map {
+                LunaVectorDto(it.concept, it.vectorCsv, it.fisherImportance, it.surpriseScore)
+            }
+            val syncTransitions = brainDao.getTopCausalTransitions(150).map {
+                LunaTransitionDto(it.fromConcept, it.toConcept, it.stdpWeight, it.transitionCount)
+            }
+            val syncEpisodes = brainDao.getRecentEpisodes(80).map {
+                LunaEpisodeDto(
+                    episode_id = it.episodeId,
+                    title_label = it.titleLabel,
+                    start_millis = it.startMillis,
+                    end_millis = it.endMillis,
+                    primary_place = it.primaryPlace,
+                    dominant_sources = it.dominantSources,
+                    key_concepts = it.keyConcepts,
+                    record_count = it.recordCount,
+                    narrative_summary = it.narrativeSummary
+                )
             }
 
             val initProg = json.encodeToString(HandshakeProgressDto(totalUnsynced, 0, 0))
@@ -352,14 +473,20 @@ object LunaSyncManager {
             while (true) {
                 val batch = recordDao.getUnsynced(BATCH_SIZE)
                 if (batch.isEmpty()) {
-                    if (!tokensIncluded && allTokens.isNotEmpty()) {
+                    if (!neuralIncluded && (allTokens.isNotEmpty() || syncVectors.isNotEmpty() || syncEpisodes.isNotEmpty())) {
                         val tokPayload = json.encodeToString(
-                            LunaSyncPayloadDto(records = emptyList(), tokens = allTokens)
+                            LunaSyncPayloadDto(
+                                records = emptyList(),
+                                tokens = allTokens,
+                                vectors = syncVectors,
+                                transitions = syncTransitions,
+                                episodes = syncEpisodes
+                            )
                         )
-                        val raw = requestJson(context, "$serverUrl/api/sync", "POST", tokPayload)
+                        val raw = requestJson(context, "$serverUrl/api/sync", "POST", maybeEncryptPayload(tokPayload))
                         val resp = json.decodeFromString<LunaSyncResponseDto>(raw)
                         tokensSent = resp.synced_tokens.coerceAtLeast(allTokens.size)
-                        tokensIncluded = true
+                        neuralIncluded = true
                         onProgress(uploaded, totalUnsynced, tokensSent)
                     }
                     break
@@ -378,18 +505,21 @@ object LunaSyncManager {
                 val payloadJson = json.encodeToString(
                     LunaSyncPayloadDto(
                         records = dtoList,
-                        tokens = if (!tokensIncluded) allTokens else emptyList()
+                        tokens = if (!neuralIncluded) allTokens else emptyList(),
+                        vectors = if (!neuralIncluded) syncVectors else emptyList(),
+                        transitions = if (!neuralIncluded) syncTransitions else emptyList(),
+                        episodes = if (!neuralIncluded) syncEpisodes else emptyList()
                     )
                 )
-                val rawResp = requestJson(context, "$serverUrl/api/sync", "POST", payloadJson)
+                val rawResp = requestJson(context, "$serverUrl/api/sync", "POST", maybeEncryptPayload(payloadJson))
                 val resp = json.decodeFromString<LunaSyncResponseDto>(rawResp)
 
                 if (resp.status == "SUCCESS") {
                     recordDao.markSynced(batch.map { it.id })
                     uploaded += batch.size
-                    if (!tokensIncluded) {
+                    if (!neuralIncluded) {
                         tokensSent = allTokens.size
-                        tokensIncluded = true
+                        neuralIncluded = true
                     }
                     val progJson = json.encodeToString(HandshakeProgressDto(totalUnsynced, uploaded, tokensSent))
                     requestJson(context, "$serverUrl/api/handshake/progress", "POST", progJson)
@@ -403,18 +533,23 @@ object LunaSyncManager {
             val finalJson = json.encodeToString(HandshakeProgressDto(totalUnsynced, uploaded, tokensSent))
             requestJson(context, "$serverUrl/api/handshake/complete", "POST", finalJson)
 
+            val e2eeLabel = if (activeE2eeKeys != null) " (E2EE P-256+AES256)" else ""
             val remaining = recordDao.countUnsynced()
             SyncResult(
                 success = true,
                 syncedCount = uploaded,
                 syncedTokens = tokensSent,
                 remainingUnsynced = remaining,
-                message = "Uploaded $uploaded memories & $tokensSent tokens to Laptop permanently"
+                message = "Uploaded $uploaded memories, $tokensSent tokens, ${syncVectors.size} vecs & ${syncEpisodes.size} episodes$e2eeLabel"
             )
         } catch (e: Throwable) {
             Log.e(TAG, "Handshake upload failed", e)
             val remaining = try { recordDao.countUnsynced() } catch (_: Throwable) { 0 }
             SyncResult(false, uploaded, tokensSent, remaining, e.message ?: "Upload interrupted")
+        } finally {
+            activeKeyPair = null
+            activeMobilePubB64 = null
+            activeE2eeKeys = null
         }
     }
 

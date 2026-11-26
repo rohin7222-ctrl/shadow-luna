@@ -1,6 +1,7 @@
 import hashlib
 import ipaddress
 import json
+import math
 import os
 import re
 import socket
@@ -8,13 +9,17 @@ import sqlite3
 import threading
 import time
 import unicodedata
+import urllib.error
+import urllib.request
 from contextlib import closing
 from datetime import datetime, timedelta
-from typing import List, Optional
-from fastapi import FastAPI, Query, Request
+from typing import Any, Dict, List, Optional
+from fastapi import Body, FastAPI, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+
+import luna_sync_crypto
 
 # Change notes for the current build of LunaServer.
 # Whenever luna_server.py changes on disk, register_server_release() detects the SHA-256 change
@@ -189,10 +194,41 @@ def init_db():
         c.execute("CREATE INDEX IF NOT EXISTS idx_edges_ts ON graph_edges(timestamp DESC)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_tokens_freq_seen ON learned_tokens(frequency DESC, last_seen DESC)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_updates_rel ON app_updates(released_at DESC)")
+        # 9. Synced 32D Neural Vectors from On-Device Titans + Matryoshka Trainer
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS neural_vectors (
+                concept TEXT PRIMARY KEY,
+                vector_csv TEXT NOT NULL,
+                fisher_importance REAL DEFAULT 1.0,
+                surprise_score REAL DEFAULT 0.2,
+                updated_at INTEGER DEFAULT 0
+            )
+        ''')
+        # 10. Synced Cross-Modal Spatio-Temporal Episodes ("Life Moments")
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS episodes (
+                episode_id TEXT PRIMARY KEY,
+                title_label TEXT NOT NULL,
+                start_millis INTEGER NOT NULL,
+                end_millis INTEGER NOT NULL,
+                primary_place TEXT DEFAULT '',
+                dominant_sources TEXT DEFAULT '',
+                key_concepts TEXT DEFAULT '',
+                record_count INTEGER DEFAULT 1,
+                narrative_summary TEXT NOT NULL,
+                updated_at INTEGER DEFAULT 0
+            )
+        ''')
+        c.execute("CREATE INDEX IF NOT EXISTS idx_episodes_end ON episodes(end_millis DESC)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_vectors_imp ON neural_vectors(fisher_importance DESC)")
         conn.commit()
 
 
 handshake_lock = threading.Lock()
+_e2ee_laptop_priv, _e2ee_laptop_pub = luna_sync_crypto.generate_ecdh_keypair()
+_e2ee_salt = hashlib.sha256(str(time.time()).encode("utf-8")).hexdigest()[:16]
+_e2ee_peer_keys: Dict[str, tuple[bytes, bytes]] = {}
+
 handshake_state = {
     "laptop_ready": False,
     "laptop_ready_at": 0,
@@ -205,6 +241,8 @@ handshake_state = {
     "last_message": "",
     "completed_at": 0,
     "last_activity_at": 0,
+    "laptop_pubkey": _e2ee_laptop_pub,
+    "session_salt": _e2ee_salt,
 }
 
 
@@ -353,7 +391,7 @@ class CognitiveEngine:
                         (f"person:{title}", f"app:{pkg}", "INTERACTED_VIA", ts)
                     )
 
-        # 4. Extract Media nodes (Photos / Screenshots / 2026 Video V-JEPA + Audio Spectral Fusion)
+        # 4. Extract Media nodes (Photos / Screenshots / 2026 Video V-JEPA + Audio Spectral + OCR + Speaker Clustering)
         clean_text = text.strip()
         if source == "PHOTO" and clean_text:
             is_screenshot = bool(meta.get("is_screenshot", False))
@@ -363,6 +401,17 @@ class CognitiveEngine:
                 "ON CONFLICT(id) DO UPDATE SET mention_count = mention_count + 1, last_seen = ?",
                 (f"media:{record['id']}", clean_text[:80], node_type, ts, ts)
             )
+            va = meta.get("visual_analysis")
+            if isinstance(va, dict):
+                for tag in (va.get("lighting_scene"), va.get("color_tone"), va.get("visual_code"), "Document/Text" if va.get("is_document") else None):
+                    if isinstance(tag, str):
+                        ct = tag.strip()
+                        if ct and ct != "Neutral":
+                            c.execute(
+                                "INSERT INTO graph_nodes (id, label, entity_type, last_seen) VALUES (?, ?, ?, ?) "
+                                "ON CONFLICT(id) DO UPDATE SET mention_count = mention_count + 1, last_seen = ?",
+                                (f"av_scene:{ct.lower()}", ct, "AV_SCENE", ts, ts)
+                            )
         elif source in ("VIDEO", "AUDIO"):
             if clean_text:
                 c.execute(
@@ -381,6 +430,7 @@ class CognitiveEngine:
                     av.get("acoustic_scene"),
                     av.get("visual_code"),
                     av.get("acoustic_code"),
+                    av.get("speaker_cluster"),
                 ]
                 for tag in av_tags:
                     if isinstance(tag, str):
@@ -490,10 +540,48 @@ class SyncToken(BaseModel):
     last_seen: int = 0
 
 
+class SyncVector(BaseModel):
+    concept: str
+    vector_csv: str
+    fisher_importance: float = 1.0
+    surprise_score: float = 0.2
+
+
+class SyncTransition(BaseModel):
+    from_concept: str
+    to_concept: str
+    stdp_weight: float = 1.0
+    transition_count: int = 1
+
+
+class SyncEpisode(BaseModel):
+    episode_id: str
+    title_label: str
+    start_millis: int
+    end_millis: int
+    primary_place: str = ""
+    dominant_sources: str = ""
+    key_concepts: str = ""
+    record_count: int = 1
+    narrative_summary: str
+
+
 class SyncPayload(BaseModel):
-    client_version: Optional[str] = "2.2.3"
-    records: List[SyncRecord]
+    client_version: Optional[str] = "0.8.0"
+    records: List[SyncRecord] = []
     tokens: List[SyncToken] = []
+    vectors: List[SyncVector] = []
+    transitions: List[SyncTransition] = []
+    episodes: List[SyncEpisode] = []
+
+
+class HandshakeMobileReadyRequest(BaseModel):
+    mobile_pubkey: Optional[str] = None
+
+
+class FeedbackRequest(BaseModel):
+    anchor_concept: Optional[str] = None
+    is_positive: bool = True
 
 
 class HandshakeProgressRequest(BaseModel):
@@ -511,6 +599,100 @@ class PublishUpdateRequest(BaseModel):
     changelog: str
     estimated_seconds: int = 12
     version: Optional[str] = None
+
+
+_BILINGUAL_GROUPS = [
+    ("photo", "photos", "camera", "picture", "image", "படம்", "புகைப்படம்", "கேமரா"),
+    ("video", "clip", "recording", "வீடியோ", "காணொளி"),
+    ("audio", "voice", "music", "song", "sound", "ஆடியோ", "குரல்", "பாடல்", "இசை"),
+    ("food", "lunch", "dinner", "breakfast", "restaurant", "swiggy", "zomato", "உணவு", "சாப்பாடு", "டிபன்"),
+    ("payment", "paid", "money", "bill", "receipt", "bank", "upi", "gpay", "paytm", "பணம்", "கட்டணம்", "ரசீது"),
+    ("hospital", "doctor", "clinic", "medicine", "pharmacy", "மருத்துவமனை", "டாக்டர்", "மருந்து"),
+    ("travel", "trip", "flight", "train", "bus", "cab", "uber", "ola", "பயணம்", "ரயில்", "பஸ்"),
+    ("meeting", "call", "office", "work", "zoom", "மீட்டிங்", "சந்திப்பு", "வேலை"),
+    ("college", "school", "class", "exam", "study", "notes", "கல்லூரி", "பள்ளி", "வகுப்பு"),
+    ("mom", "mother", "amma", "அம்மா"),
+    ("dad", "father", "appa", "அப்பா"),
+    ("friend", "friends", "buddy", "நண்பர்", "நண்பர்கள்"),
+    ("home", "house", "வீடு"),
+    ("shopping", "order", "amazon", "flipkart", "delivery", "ஆர்டர்", "பொருள்"),
+    ("message", "chat", "whatsapp", "telegram", "sms", "செய்தி", "மெசேஜ்"),
+    ("outdoor", "bright", "park", "beach", "வெளியே", "பூங்கா", "கடற்கரை"),
+]
+_BILINGUAL_MAP = {w: grp for grp in _BILINGUAL_GROUPS for w in grp}
+
+
+def _has_tamil(word: str) -> bool:
+    return any("\u0b80" <= ch <= "\u0bff" for ch in word)
+
+
+def _expand_bilingual_synonyms(terms: List[str]) -> List[str]:
+    base = set(terms)
+    out = []
+    seen = set()
+    for t in terms:
+        grp = _BILINGUAL_MAP.get(t)
+        if not grp:
+            continue
+        t_tamil = _has_tamil(t)
+        ordered = sorted(grp, key=lambda alt: 0 if (_has_tamil(alt) != t_tamil) else 1)
+        cnt = 0
+        for alt in ordered:
+            if alt not in base and alt not in seen:
+                seen.add(alt)
+                out.append(alt)
+                cnt += 1
+                if cnt >= 10:
+                    break
+    return out
+
+
+def _parse_vec_csv(csv_str: str) -> List[float]:
+    try:
+        return [float(x) for x in (csv_str or "").split(",") if x.strip()]
+    except Exception:
+        return []
+
+
+def _cosine(a: List[float], b: List[float]) -> float:
+    n = min(len(a), len(b))
+    if n == 0:
+        return 0.0
+    dot = sum(a[i] * b[i] for i in range(n))
+    na = math.sqrt(sum(a[i] * a[i] for i in range(n)))
+    nb = math.sqrt(sum(b[i] * b[i] for i in range(n)))
+    if na < 1e-8 or nb < 1e-8:
+        return 0.0
+    return max(-1.0, min(1.0, dot / (na * nb)))
+
+
+def _try_local_slm_summary(query: str, evidence_lines: List[str]) -> Optional[str]:
+    """Strictly grounded optional localhost Ollama SLM hook (100% offline, never invents facts)."""
+    if not evidence_lines or os.environ.get("SHADOW_ENABLE_LOCAL_SLM", "0") != "1":
+        return None
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:11434/api/tags", timeout=0.3) as resp:
+            tags_data = json.loads(resp.read().decode("utf-8"))
+        models = [m.get("name") for m in tags_data.get("models", []) if m.get("name")]
+        if not models:
+            return None
+        model = os.environ.get("SHADOW_LOCAL_SLM_MODEL") or models[0]
+        prompt = (
+            "You are Shadow Luna, a strictly private personal memory assistant. "
+            "Summarize the answer ONLY from the following user records concisely in Tamil or English matching the question. "
+            "Do not invent anything outside these lines.\n\nQuestion: " + query + "\nRecords:\n" + "\n".join(evidence_lines[:5])
+        )
+        req = urllib.request.Request(
+            "http://127.0.0.1:11434/api/generate",
+            method="POST",
+            data=json.dumps({"model": model, "prompt": prompt, "stream": False}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=2.5) as resp:
+            out = json.loads(resp.read().decode("utf-8")).get("response", "").strip()
+            return out or None
+    except Exception:
+        return None
 
 
 DISCOVERY_PORT = 8800
@@ -578,10 +760,16 @@ def handshake_laptop_ready(request: Request):
 
 
 @app.post("/api/handshake/mobile-ready")
-def handshake_mobile_ready():
+def handshake_mobile_ready(req: Optional[HandshakeMobileReadyRequest] = Body(default=None)):
     now_ms = int(time.time() * 1000)
     with handshake_lock:
         _refresh_handshake_locked(now_ms)
+        if req and req.mobile_pubkey:
+            try:
+                sec = luna_sync_crypto.compute_shared_secret(_e2ee_laptop_priv, req.mobile_pubkey)
+                _e2ee_peer_keys[req.mobile_pubkey] = luna_sync_crypto.derive_session_keys(sec, handshake_state["session_salt"])
+            except Exception:
+                pass
         handshake_state["mobile_ready"] = True
         handshake_state["mobile_ready_at"] = now_ms
         handshake_state["last_activity_at"] = now_ms
@@ -661,9 +849,29 @@ def handshake_cancel():
 
 # ─── Endpoints ───
 @app.post("/api/sync")
-def sync_memories(payload: SyncPayload):
+def sync_memories(raw_body: Dict[str, Any] = Body(...)):
+    e2ee_used = False
+    if "encrypted_payload" in raw_body and "mobile_pubkey" in raw_body:
+        mob_pub = raw_body.get("mobile_pubkey", "")
+        with handshake_lock:
+            keys = _e2ee_peer_keys.get(mob_pub)
+        if not keys:
+            return JSONResponse(status_code=401, content={"error": "Missing E2EE session keys — reconnect handshake"})
+        try:
+            plain_bytes = luna_sync_crypto.decrypt_envelope(
+                raw_body["encrypted_payload"], raw_body["iv"], raw_body["hmac_tag"], keys[0], keys[1]
+            )
+            payload = SyncPayload.model_validate(json.loads(plain_bytes.decode("utf-8")))
+            e2ee_used = True
+        except Exception as e:
+            return JSONResponse(status_code=400, content={"error": f"E2EE decrypt failed: {e}"})
+    else:
+        payload = SyncPayload.model_validate(raw_body)
+
     saved = 0
     tokens_saved = 0
+    vectors_saved = 0
+    episodes_saved = 0
     now = int(time.time() * 1000)
 
     with closing(open_db()) as conn:
@@ -697,13 +905,78 @@ def sync_memories(payload: SyncPayload):
             )
             tokens_saved += 1
 
+        for vec in payload.vectors:
+            con = vec.concept.strip().lower()
+            if not con or not vec.vector_csv:
+                continue
+            c.execute(
+                "INSERT INTO neural_vectors (concept, vector_csv, fisher_importance, surprise_score, updated_at) "
+                "VALUES (?, ?, ?, ?, ?) ON CONFLICT(concept) DO UPDATE SET "
+                "vector_csv = ?, fisher_importance = MAX(fisher_importance, ?), surprise_score = ?, updated_at = ?",
+                (con, vec.vector_csv, vec.fisher_importance, vec.surprise_score, now,
+                 vec.vector_csv, vec.fisher_importance, vec.surprise_score, now)
+            )
+            vectors_saved += 1
+
+        for tr in payload.transitions:
+            fa = tr.from_concept.strip().lower()
+            fb = tr.to_concept.strip().lower()
+            if fa and fb and fa != fb:
+                c.execute(
+                    "INSERT INTO learned_transitions (transition_key, from_concept, to_concept, weight, transition_count, last_seen) "
+                    "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(transition_key) DO UPDATE SET "
+                    "weight = MAX(weight, ?), transition_count = MAX(transition_count, ?), last_seen = MAX(last_seen, ?)",
+                    (f"{fa}->{fb}", fa, fb, tr.stdp_weight, tr.transition_count, now,
+                     tr.stdp_weight, tr.transition_count, now)
+                )
+
+        for ep in payload.episodes:
+            c.execute(
+                "INSERT INTO episodes (episode_id, title_label, start_millis, end_millis, primary_place, "
+                "dominant_sources, key_concepts, record_count, narrative_summary, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(episode_id) DO UPDATE SET "
+                "narrative_summary = ?, key_concepts = ?, record_count = MAX(record_count, ?), end_millis = MAX(end_millis, ?), updated_at = ?",
+                (ep.episode_id, ep.title_label, ep.start_millis, ep.end_millis, ep.primary_place,
+                 ep.dominant_sources, ep.key_concepts, ep.record_count, ep.narrative_summary, now,
+                 ep.narrative_summary, ep.key_concepts, ep.record_count, ep.end_millis, now)
+            )
+            c.execute(
+                "INSERT INTO graph_nodes (id, label, entity_type, last_seen) VALUES (?, ?, 'EPISODE', ?) "
+                "ON CONFLICT(id) DO UPDATE SET mention_count = mention_count + 1, last_seen = ?",
+                (f"episode:{ep.episode_id}", ep.title_label[:42], ep.end_millis, ep.end_millis)
+            )
+            episodes_saved += 1
+
         conn.commit()
     return {
         "status": "SUCCESS",
+        "e2ee": e2ee_used,
         "synced_records": saved,
         "synced_tokens": tokens_saved,
+        "synced_vectors": vectors_saved,
+        "synced_episodes": episodes_saved,
         "total_received": len(payload.records)
     }
+
+
+@app.post("/api/feedback")
+def submit_feedback(req: FeedbackRequest):
+    """Live Human-in-the-Loop RLHF feedback endpoint adjusting causal & graph weights."""
+    factor = 1.15 if req.is_positive else 0.72
+    anchor = (req.anchor_concept or "").strip().lower()
+    with closing(open_db()) as conn:
+        c = conn.cursor()
+        if anchor:
+            c.execute(
+                "UPDATE learned_transitions SET weight = MAX(0.1, MIN(100.0, weight * ?)) WHERE from_concept = ?",
+                (factor, anchor)
+            )
+            c.execute(
+                "UPDATE graph_nodes SET mention_count = MAX(1, mention_count + ?) WHERE LOWER(label) = ?",
+                (1 if req.is_positive else -1, anchor)
+            )
+        conn.commit()
+    return {"status": "UPDATED", "anchor": anchor, "positive": req.is_positive}
 
 
 @app.post("/api/reset-brain")
@@ -718,6 +991,8 @@ def reset_brain():
         c.execute("DELETE FROM learned_tokens")
         c.execute("DELETE FROM sync_sessions")
         c.execute("DELETE FROM learned_transitions")
+        c.execute("DELETE FROM neural_vectors")
+        c.execute("DELETE FROM episodes")
         conn.commit()
     with handshake_lock:
         handshake_state["laptop_ready"] = False
@@ -992,6 +1267,12 @@ def chat_with_luna(req: ChatRequest):
                         expanded_terms.append(best_ng)
                     fuzzy_matches.append(f"{t} ≈ {best_ng}")
 
+        # Bilingual Tamil <-> English linguistic bridge
+        bilingual_alts = _expand_bilingual_synonyms(expanded_terms)
+        for alt in bilingual_alts:
+            if alt not in expanded_terms:
+                expanded_terms.append(alt)
+
         now_ms = int(time.time() * 1000)
         scored_memories = {}
 
@@ -1014,6 +1295,7 @@ def chat_with_luna(req: ChatRequest):
             add_score(dict(r), 10.0)
 
         # BM25 specificity-weighted token recall
+        bilingual_set = set(bilingual_alts)
         for tok in expanded_terms:
             safe_tok = _escape_like(tok)
             t_rows = c.execute(
@@ -1022,12 +1304,39 @@ def chat_with_luna(req: ChatRequest):
                 (f"%{safe_tok}%",)
             ).fetchall()
             specificity = min(2.2, max(0.8, 1.0 + math.log(1.0 + 10.0 / max(1, len(t_rows))) - 0.15 * (len(t_rows) / 40.0)))
-            base_w = (4.0 if tok in meaningful else 2.4) * specificity
+            role_w = 4.0 if tok in meaningful else (2.1 if tok in bilingual_set else 2.4)
+            base_w = role_w * specificity
             for r in t_rows:
                 add_score(dict(r), base_w)
 
+        # Dense Vector Cosine Recall over synced phone neural_vectors
+        vec_neighbors = []
+        vec_rows = c.execute("SELECT concept, vector_csv FROM neural_vectors ORDER BY fisher_importance DESC LIMIT 250").fetchall()
+        if vec_rows:
+            parsed_vecs = {vr["concept"]: _parse_vec_csv(vr["vector_csv"]) for vr in vec_rows}
+            anchor_vecs = [parsed_vecs[t] for t in expanded_terms if t in parsed_vecs and parsed_vecs[t]]
+            if anchor_vecs:
+                dim = len(anchor_vecs[0])
+                q_vec = [sum(v[d] for v in anchor_vecs if len(v) == dim) / len(anchor_vecs) for d in range(dim)]
+                sims = []
+                for c_name, c_vec in parsed_vecs.items():
+                    if c_name not in expanded_terms and c_vec:
+                        s = _cosine(q_vec, c_vec)
+                        if s >= 0.35:
+                            sims.append((c_name, s))
+                sims.sort(key=lambda x: x[1], reverse=True)
+                vec_neighbors = sims[:4]
+                for v_concept, v_sim in vec_neighbors[:2]:
+                    for r in c.execute(
+                        "SELECT id, source_type, text_content, timestamp FROM memories "
+                        "WHERE text_content LIKE ? ESCAPE '\\' ORDER BY timestamp DESC LIMIT 5",
+                        (f"%{_escape_like(v_concept)}%",)
+                    ).fetchall():
+                        add_score(dict(r), 2.8 * v_sim)
+
         # Temporal window filter ("yesterday", "today", "நேற்று", "இன்று")
         tw = _resolve_temporal_window(q_lower)
+        matched_episodes = {}
         if tw:
             s_ms, e_ms, tw_label = tw
             for r in c.execute(
@@ -1036,8 +1345,22 @@ def chat_with_luna(req: ChatRequest):
                 (s_ms, e_ms)
             ).fetchall():
                 add_score(dict(r), 4.5)
+            for er in c.execute(
+                "SELECT * FROM episodes WHERE end_millis >= ? AND start_millis <= ? ORDER BY end_millis DESC LIMIT 4",
+                (s_ms, e_ms)
+            ).fetchall():
+                matched_episodes[er["episode_id"]] = dict(er)
         else:
             tw_label = None
+
+        for tok in expanded_terms[:6]:
+            st = _escape_like(tok)
+            for er in c.execute(
+                "SELECT * FROM episodes WHERE key_concepts LIKE ? ESCAPE '\\' OR narrative_summary LIKE ? ESCAPE '\\' "
+                "ORDER BY end_millis DESC LIMIT 3",
+                (f"%{st}%", f"%{st}%")
+            ).fetchall():
+                matched_episodes[er["episode_id"]] = dict(er)
 
         matched_nodes_map = {}
         for tok in expanded_terms:
@@ -1069,7 +1392,7 @@ def chat_with_luna(req: ChatRequest):
 
     ranked = sorted(scored_memories.values(), key=lambda x: (x["score"], x["row"]["timestamp"]), reverse=True)[:5]
 
-    if not ranked and not matched_nodes and not causal_next:
+    if not ranked and not matched_nodes and not causal_next and not matched_episodes and not vec_neighbors:
         return {
             "query": query,
             "learned": False,
@@ -1080,7 +1403,7 @@ def chat_with_luna(req: ChatRequest):
             )
         }
 
-    lines = [f"🧠 [CognitiveEngine v3 • {total_memories} memories • {total_vocab} tokens]"]
+    lines = [f"🧠 [CognitiveEngine v4 (Vectors+Episodes+E2EE) • {total_memories} memories • {total_vocab} tokens]"]
     if tw_label:
         lines.append(f"Temporal Window: {tw_label}")
     if fuzzy_matches:
@@ -1088,19 +1411,34 @@ def chat_with_luna(req: ChatRequest):
     if causal_next:
         chain_txt = " → ".join(f"{n['to_concept']} (×{n['transition_count']})" for n in causal_next)
         lines.append(f"STDP Causal Next: {anchor} → {chain_txt}")
+    if vec_neighbors:
+        lines.append("Dense Vector Neighbors: " + ", ".join(f"{c_n} ({v_s:.2f})" for c_n, v_s in vec_neighbors[:3]))
     if matched_nodes:
         entities_str = ", ".join(f"{n['label']} ({n['entity_type']} ×{n['mention_count']})" for n in matched_nodes[:4])
         lines.append(f"Graph Entities: {entities_str}")
+    if matched_episodes:
+        eps = sorted(matched_episodes.values(), key=lambda e: e["end_millis"], reverse=True)[:2]
+        for ep in eps:
+            lines.append(f"Episode: {ep['narrative_summary']}")
+
+    ev_lines = []
     for item in ranked:
         r = item["row"]
         ts_str = _fmt_ts(r["timestamp"], "%d %b %I:%M %p")
         content_txt = (r["text_content"] or "").strip() or "Metadata record"
-        lines.append(f"• [{r['source_type']} • {ts_str}] {content_txt}")
+        ev_line = f"• [{r['source_type']} • {ts_str}] {content_txt}"
+        lines.append(ev_line)
+        ev_lines.append(ev_line)
+
+    slm_summary = _try_local_slm_summary(query, ev_lines)
+    if slm_summary:
+        lines.insert(1, f"Local SLM Summary: {slm_summary}")
 
     return {
         "query": query,
         "learned": True,
         "memories_total": total_memories,
+        "anchor_concept": anchor or (prioritized_anchors[0] if prioritized_anchors else None),
         "response": "\n".join(lines)
     }
 

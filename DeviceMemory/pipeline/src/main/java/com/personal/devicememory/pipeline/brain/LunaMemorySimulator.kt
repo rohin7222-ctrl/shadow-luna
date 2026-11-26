@@ -40,6 +40,7 @@ data class SimulationSnapshot(
     val curiosityTarget: String = "",
     val causalTransitionsCount: Int = 0,
     val topCausalChain: String = "",
+    val episodesCount: Int = 0,
     val topSimulatedConcepts: List<String> = emptyList()
 )
 
@@ -64,7 +65,7 @@ object LunaMemorySimulator {
         "sending", "file", "from", "with", "this", "that", "have", "your", "the",
         "and", "for", "are", "you", "new", "messages", "message", "chats", "chat",
         "dcim", "emulated", "storage", "download", "downloads", "metadata", "null", "true", "false",
-        "vad", "hz", "kbps", "dominant", "mix"
+        "vad", "hz", "kbps", "dominant", "mix", "ocr"
     )
 
     private val CONCEPT_WORD_REGEX = Regex("""[\p{L}\p{M}]{2,32}""")
@@ -142,6 +143,7 @@ object LunaMemorySimulator {
             curiosityTarget = world?.curiosityTarget ?: "",
             causalTransitionsCount = brainDao.countCausalTransitions(),
             topCausalChain = causalChain,
+            episodesCount = brainDao.countEpisodes(),
             topSimulatedConcepts = top
         )
         _snapshot.value = snap
@@ -411,6 +413,19 @@ object LunaMemorySimulator {
             passIndex = nextPass
         )
 
+        // Cross-modal spatio-temporal Episode Stitching ("Life Moments")
+        val stitchedEpisodes = EpisodeStitchingEngine.stitchEpisodes(
+            records = batch,
+            conceptExtractor = ::extractSemanticConcepts,
+            nowMs = nowMs
+        )
+        if (stitchedEpisodes.isNotEmpty()) {
+            brainDao.upsertEpisodes(stitchedEpisodes)
+        }
+        if (nextPass % 5 == 0) {
+            brainDao.trimEpisodes(keepLimit = 500)
+        }
+
         val totalLinks = brainDao.countAssociations()
         val totalInsights = brainDao.countInsights()
         val totalVecs = brainDao.countVectors()
@@ -419,6 +434,7 @@ object LunaMemorySimulator {
         val topCausal = brainDao.getTopCausalTransitions(1).firstOrNull()
         val topChain = topCausal?.let { "${it.fromConcept} → ${it.toConcept}" } ?: ""
         val causalCount = brainDao.countCausalTransitions()
+        val episodesCount = brainDao.countEpisodes()
 
         brainDao.saveStats(
             SimulationStatsEntity(
@@ -446,6 +462,7 @@ object LunaMemorySimulator {
             curiosityTarget = futureMetrics.curiosityTarget,
             causalTransitionsCount = causalCount,
             topCausalChain = topChain,
+            episodesCount = episodesCount,
             topSimulatedConcepts = topConceptsDisplay
         )
     }

@@ -14,7 +14,8 @@ data class AudioItem(
     val sizeBytes: Long,
     val mimeType: String?,
     val dateAdded: Long,
-    val analysis: AudioAnalysisResult? = null
+    val analysis: AudioAnalysisResult? = null,
+    val speakerCluster: String? = null
 )
 
 object AudioMapper {
@@ -36,22 +37,26 @@ object AudioMapper {
             val a = item.analysis
             if (a != null) {
                 val vadPct = (a.speechRatio * 100.0).toInt().coerceIn(0, 100)
-                append(" [${a.acousticScene}, VAD ${vadPct}%, ${a.spectralCentroidHz}Hz, ${a.acousticCode}]")
+                val spk = if (!item.speakerCluster.isNullOrBlank()) ", ${item.speakerCluster}" else ""
+                append(" [${a.acousticScene}, VAD ${vadPct}%, ${a.spectralCentroidHz}Hz, ${a.acousticCode}$spk]")
             }
         }
 
         val analysisMap = item.analysis?.let { a ->
-            mapOf<String, Any?>(
-                "acoustic_scene" to a.acousticScene,
-                "speech_ratio" to a.speechRatio,
-                "spectral_centroid_hz" to a.spectralCentroidHz,
-                "spectral_flatness" to a.spectralFlatness,
-                "spectral_flux" to a.spectralFlux,
-                "rms_db" to a.rmsDb,
-                "acoustic_code" to a.acousticCode,
-                "mfcc_signature" to a.mfccSignature,
-                "mel_patch_latent" to a.melPatchLatent
-            )
+            buildMap<String, Any?> {
+                put("acoustic_scene", a.acousticScene)
+                put("speech_ratio", a.speechRatio)
+                put("spectral_centroid_hz", a.spectralCentroidHz)
+                put("spectral_flatness", a.spectralFlatness)
+                put("spectral_flux", a.spectralFlux)
+                put("rms_db", a.rmsDb)
+                put("acoustic_code", a.acousticCode)
+                put("mfcc_signature", a.mfccSignature)
+                put("mel_patch_latent", a.melPatchLatent)
+                if (!item.speakerCluster.isNullOrBlank()) {
+                    put("speaker_cluster", item.speakerCluster)
+                }
+            }
         }
 
         val metadata = mutableMapOf<String, Any?>(

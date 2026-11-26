@@ -65,6 +65,8 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.SystemUpdate
+import androidx.compose.material.icons.filled.ThumbDown
+import androidx.compose.material.icons.filled.ThumbUp
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.Warning
@@ -151,6 +153,7 @@ fun MainScreen(
     onInstallUpdate: (LunaUpdateItemDto) -> Unit,
     onToggleSource: (SourceType, Boolean) -> Unit,
     onCollectOfflineNow: () -> Unit,
+    onChatFeedback: (Long, Boolean) -> Unit,
     onDeleteAll: () -> Unit,
     onShowDeleteConfirmation: () -> Unit,
     onDismissDeleteConfirmation: () -> Unit,
@@ -462,7 +465,8 @@ fun MainScreen(
                         topPolicyStrategy = uiState.topPolicyStrategy,
                         topCausalChain = uiState.topCausalChain,
                         topTopics = uiState.topSimulatedTopics,
-                        onSendMessage = onSendOfflineMessage
+                        onSendMessage = onSendOfflineMessage,
+                        onFeedback = onChatFeedback
                     )
                 }
 
@@ -546,7 +550,8 @@ private fun OfflineChatScreen(
     topPolicyStrategy: String,
     topCausalChain: String,
     topTopics: List<String>,
-    onSendMessage: (String) -> Unit
+    onSendMessage: (String) -> Unit,
+    onFeedback: (Long, Boolean) -> Unit
 ) {
     var inputText by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
@@ -711,6 +716,52 @@ private fun OfflineChatScreen(
                                             color = TextPrimary,
                                             style = MaterialTheme.typography.bodyMedium
                                         )
+                                        if (msg.learned) {
+                                            Row(
+                                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                modifier = Modifier.padding(top = 4.dp)
+                                            ) {
+                                                if (msg.feedback == 0) {
+                                                    Surface(
+                                                        onClick = { onFeedback(msg.id, true) },
+                                                        shape = RoundedCornerShape(999.dp),
+                                                        color = MintSuccess.copy(alpha = 0.12f),
+                                                        border = BorderStroke(0.7.dp, MintSuccess.copy(alpha = 0.30f))
+                                                    ) {
+                                                        Row(
+                                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                                                            verticalAlignment = Alignment.CenterVertically,
+                                                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                                        ) {
+                                                            Icon(Icons.Default.ThumbUp, contentDescription = "Helpful", tint = MintSuccess, modifier = Modifier.size(12.dp))
+                                                            Text("Helpful", style = MaterialTheme.typography.labelSmall, color = MintSuccess)
+                                                        }
+                                                    }
+                                                    Surface(
+                                                        onClick = { onFeedback(msg.id, false) },
+                                                        shape = RoundedCornerShape(999.dp),
+                                                        color = CoralDanger.copy(alpha = 0.12f),
+                                                        border = BorderStroke(0.7.dp, CoralDanger.copy(alpha = 0.30f))
+                                                    ) {
+                                                        Row(
+                                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                                                            verticalAlignment = Alignment.CenterVertically,
+                                                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                                        ) {
+                                                            Icon(Icons.Default.ThumbDown, contentDescription = "Wrong", tint = CoralDanger, modifier = Modifier.size(12.dp))
+                                                            Text("Fix", style = MaterialTheme.typography.labelSmall, color = CoralDanger)
+                                                        }
+                                                    }
+                                                } else {
+                                                    Text(
+                                                        text = if (msg.feedback > 0) "✓ Policy reinforced" else "✓ Adjusted down",
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        color = if (msg.feedback > 0) MintSuccess else TextMuted
+                                                    )
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }

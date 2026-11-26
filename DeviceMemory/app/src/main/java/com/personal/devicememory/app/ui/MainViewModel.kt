@@ -7,6 +7,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.personal.devicememory.app.update.ShadowUpdateService
 import com.personal.devicememory.app.update.ShadowUpdateState
+import com.personal.devicememory.collector.audio.AcousticSpeakerClusterer
 import com.personal.devicememory.core.common.model.SourceType
 import com.personal.devicememory.core.database.DeviceMemoryDatabase
 import com.personal.devicememory.core.database.entity.CollectorConfigEntity
@@ -55,7 +56,10 @@ data class OfflineChatMessage(
     val id: Long,
     val isUser: Boolean,
     val text: String,
-    val learned: Boolean = false
+    val learned: Boolean = false,
+    val anchorConcept: String? = null,
+    val primaryStrategy: String = "EXACT",
+    val feedback: Int = 0 // 0 = neutral, 1 = helpful, -1 = wrong
 )
 
 data class SourceUiState(
@@ -188,10 +192,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         id = System.currentTimeMillis() + 1,
                         isUser = false,
                         text = reply.response,
-                        learned = reply.learned
+                        learned = reply.learned,
+                        anchorConcept = reply.anchorConcept,
+                        primaryStrategy = reply.primaryStrategy
                     )
                 )
             }
+        }
+    }
+
+    fun submitChatFeedback(messageId: Long, isPositive: Boolean) {
+        val target = _uiState.value.messages.firstOrNull { it.id == messageId } ?: return
+        if (target.isUser || target.feedback != 0) return
+        val vote = if (isPositive) 1 else -1
+        _uiState.update { st ->
+            st.copy(
+                messages = st.messages.map { m ->
+                    if (m.id == messageId) m.copy(feedback = vote) else m
+                }
+            )
+        }
+        val app = getApplication<Application>()
+        viewModelScope.launch {
+            try {
+                OnDeviceLunaBrain.recordChatFeedback(app, target.anchorConcept, target.primaryStrategy, isPositive)
+            } catch (_: Throwable) {}
         }
     }
 
@@ -497,6 +522,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 LunaMemorySimulator.stopSimulationLoopAndWait()
                 DeviceMemoryDatabase.destroyAll(app)
+                AcousticSpeakerClusterer.clear(app)
                 val newDb = DeviceMemoryDatabase.getInstance(app)
                 val defaults = SourceType.entries.map { st ->
                     CollectorConfigEntity(sourceType = st.name, enabled = 0, lastRunStatus = "NEVER")

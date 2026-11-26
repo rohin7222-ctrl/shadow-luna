@@ -17,7 +17,8 @@ data class VideoItem(
     val dateTaken: Long,
     val dateAdded: Long,
     val visual: VideoAnalysisResult? = null,
-    val audio: AudioAnalysisResult? = null
+    val audio: AudioAnalysisResult? = null,
+    val speakerCluster: String? = null
 )
 
 object VideoMapper {
@@ -38,6 +39,9 @@ object VideoMapper {
             val vadPct = (a.speechRatio * 100.0).toInt().coerceIn(0, 100)
             avSummaryParts.add("${a.acousticScene} VAD ${vadPct}%")
             avSummaryParts.add(a.acousticCode)
+        }
+        if (!item.speakerCluster.isNullOrBlank()) {
+            avSummaryParts.add(item.speakerCluster)
         }
 
         val avSuffix = if (avSummaryParts.isNotEmpty()) {
@@ -67,6 +71,9 @@ object VideoMapper {
             avMap["spectral_centroid_hz"] = a.spectralCentroidHz
             avMap["acoustic_code"] = a.acousticCode
             avMap["mel_patch_latent"] = a.melPatchLatent
+        }
+        if (!item.speakerCluster.isNullOrBlank()) {
+            avMap["speaker_cluster"] = item.speakerCluster
         }
 
         val metadata = mutableMapOf<String, Any?>(

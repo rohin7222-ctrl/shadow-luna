@@ -6,6 +6,7 @@ import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import com.personal.devicememory.core.database.entity.BrainInsightEntity
 import com.personal.devicememory.core.database.entity.CausalTransitionEntity
+import com.personal.devicememory.core.database.entity.EpisodeEntity
 import com.personal.devicememory.core.database.entity.FutureMemoryCellEntity
 import com.personal.devicememory.core.database.entity.LearnedAssociationEntity
 import com.personal.devicememory.core.database.entity.NeuralPolicyStateEntity
@@ -195,4 +196,35 @@ interface BrainSimulationDao {
 
     @Query("DELETE FROM causal_transitions")
     suspend fun clearCausalTransitions()
+
+    @Query("UPDATE causal_transitions SET stdp_weight = MAX(0.1, MIN(100.0, stdp_weight * :factor)) WHERE from_concept = :anchor")
+    suspend fun scaleCausalWeight(anchor: String, factor: Double)
+
+    // ─── Cross-Modal Spatio-Temporal Episodes ("Life Moments") ───
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertEpisodes(episodes: List<EpisodeEntity>)
+
+    @Query("SELECT * FROM memory_episodes ORDER BY end_millis DESC LIMIT :limit")
+    suspend fun getRecentEpisodes(limit: Int = 20): List<EpisodeEntity>
+
+    @Query("""
+        SELECT * FROM memory_episodes
+        WHERE key_concepts LIKE '%' || :term || '%' ESCAPE '\'
+           OR narrative_summary LIKE '%' || :term || '%' ESCAPE '\'
+        ORDER BY end_millis DESC
+        LIMIT :limit
+    """)
+    suspend fun searchEpisodes(term: String, limit: Int = 5): List<EpisodeEntity>
+
+    @Query("SELECT * FROM memory_episodes WHERE end_millis >= :startMs AND start_millis <= :endMs ORDER BY end_millis DESC LIMIT :limit")
+    suspend fun getEpisodesInWindow(startMs: Long, endMs: Long, limit: Int = 6): List<EpisodeEntity>
+
+    @Query("SELECT COUNT(*) FROM memory_episodes")
+    suspend fun countEpisodes(): Int
+
+    @Query("DELETE FROM memory_episodes WHERE episode_id NOT IN (SELECT episode_id FROM memory_episodes ORDER BY end_millis DESC LIMIT :keepLimit)")
+    suspend fun trimEpisodes(keepLimit: Int = 500)
+
+    @Query("DELETE FROM memory_episodes")
+    suspend fun clearEpisodes()
 }

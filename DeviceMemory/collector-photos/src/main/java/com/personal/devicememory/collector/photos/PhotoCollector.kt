@@ -1,6 +1,7 @@
 package com.personal.devicememory.collector.photos
 
 import android.Manifest
+import android.content.ContentUris
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
@@ -45,7 +46,7 @@ class PhotoCollector(
             return emptyList()
         }
 
-        val records = mutableListOf<CollectedRecord>()
+        val items = mutableListOf<PhotoItem>()
         val projection = arrayOf(
             MediaStore.Images.Media._ID,
             MediaStore.Images.Media.DISPLAY_NAME,
@@ -107,27 +108,45 @@ class PhotoCollector(
 
                     val isScreenshot = PhotoMapper.isScreenshot(displayName, bucketName)
 
-                    val item = PhotoItem(
-                        mediaId = mediaId,
-                        displayName = displayName,
-                        bucketName = bucketName,
-                        mimeType = mimeType,
-                        dateTaken = dateTaken,
-                        dateAdded = dateAddedSec * 1000,
-                        sizeBytes = sizeBytes,
-                        width = width,
-                        height = height,
-                        isScreenshot = isScreenshot
+                    items.add(
+                        PhotoItem(
+                            mediaId = mediaId,
+                            displayName = displayName,
+                            bucketName = bucketName,
+                            mimeType = mimeType,
+                            dateTaken = dateTaken,
+                            dateAdded = dateAddedSec * 1000,
+                            sizeBytes = sizeBytes,
+                            width = width,
+                            height = height,
+                            isScreenshot = isScreenshot
+                        )
                     )
-
-                    records.add(PhotoMapper.map(item))
                 }
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to query MediaStore for images", e)
         }
 
-        Log.i(TAG, "Collected ${records.size} photo/screenshot records")
+        // Deep visual + offline OCR budget: newest 15 photos/screenshots per pass
+        val deepStartIndex = (items.size - 15).coerceAtLeast(0)
+        val records = ArrayList<CollectedRecord>(items.size)
+        for (i in items.indices) {
+            val item = items[i]
+            val enriched = if (i >= deepStartIndex && item.mediaId > 0L) {
+                val uri = ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, item.mediaId)
+                try {
+                    AndroidPhotoAnalyzer.analyzeUri(context, uri, item.isScreenshot)
+                } catch (e: Exception) {
+                    Log.d(TAG, "Photo analysis skipped for ${item.mediaId}: ${e.message}")
+                    null
+                }
+            } else null
+
+            records.add(PhotoMapper.map(item.copy(visual = enriched?.visual, ocrText = enriched?.ocrText)))
+        }
+
+        Log.i(TAG, "Collected ${records.size} photo/screenshot records (OCR+visual=${items.size - deepStartIndex})")
         return records
     }
 }

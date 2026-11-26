@@ -297,7 +297,7 @@ class LunaServerController:
         if not os.path.exists(DB_PATH):
             return {
                 "memories_count": 0, "nodes_count": 0, "tokens_count": 0, "db_size_kb": 0.0,
-                "latest_version": "2.2.0", "memories": [], "nodes": [], "tokens": [], "sessions": [], "transitions": [], "updates": []
+                "latest_version": "2.2.0", "memories": [], "nodes": [], "edges": [], "episodes": [], "tokens": [], "sessions": [], "transitions": [], "updates": []
             }
         try:
             with closing(sqlite3.connect(DB_PATH, timeout=15.0)) as conn:
@@ -313,10 +313,12 @@ class LunaServerController:
                     reverse=True,
                 )[:20]
                 memories = [dict(r) for r in c.execute("SELECT * FROM memories ORDER BY timestamp DESC LIMIT 40").fetchall()]
-                nodes = [dict(r) for r in c.execute("SELECT * FROM graph_nodes ORDER BY mention_count DESC LIMIT 30").fetchall()]
+                nodes = [dict(r) for r in c.execute("SELECT * FROM graph_nodes ORDER BY mention_count DESC LIMIT 36").fetchall()]
+                edges = [dict(r) for r in c.execute("SELECT * FROM graph_edges ORDER BY timestamp DESC LIMIT 60").fetchall()]
                 tokens = []
                 sessions = []
                 transitions = []
+                episodes = []
                 try:
                     tokens = [dict(r) for r in c.execute("SELECT * FROM learned_tokens ORDER BY frequency DESC, last_seen DESC LIMIT 150").fetchall()]
                 except Exception:
@@ -329,6 +331,10 @@ class LunaServerController:
                     transitions = [dict(r) for r in c.execute("SELECT * FROM learned_transitions ORDER BY weight DESC, transition_count DESC LIMIT 20").fetchall()]
                 except Exception:
                     pass
+                try:
+                    episodes = [dict(r) for r in c.execute("SELECT * FROM episodes ORDER BY end_millis DESC LIMIT 12").fetchall()]
+                except Exception:
+                    pass
             db_bytes = os.path.getsize(DB_PATH)
             latest_ver = updates[0]["version"] if updates else "2.2.0"
             snap = {
@@ -339,6 +345,8 @@ class LunaServerController:
                 "latest_version": latest_ver,
                 "memories": memories,
                 "nodes": nodes,
+                "edges": edges,
+                "episodes": episodes,
                 "tokens": tokens,
                 "sessions": sessions,
                 "transitions": transitions,
@@ -351,7 +359,7 @@ class LunaServerController:
                 return dict(self._last_good_snap, error=str(e))
             return {
                 "memories_count": 0, "nodes_count": 0, "tokens_count": 0, "db_size_kb": 0.0,
-                "latest_version": "?", "memories": [], "nodes": [], "tokens": [], "sessions": [], "transitions": [], "updates": [], "error": str(e)
+                "latest_version": "?", "memories": [], "nodes": [], "edges": [], "episodes": [], "tokens": [], "sessions": [], "transitions": [], "updates": [], "error": str(e)
             }
 
     def publish_update(self, title: str, changelog: str, estimated_seconds: int = 12) -> dict:
@@ -424,12 +432,13 @@ class LunaServerController:
                 pass
         if os.path.exists(DB_PATH):
             with closing(sqlite3.connect(DB_PATH, timeout=15.0)) as conn:
-                for tbl in ("memories", "graph_nodes", "graph_edges", "user_state", "learned_tokens", "sync_sessions", "learned_transitions"):
+                for tbl in ("memories", "graph_nodes", "graph_edges", "user_state", "learned_tokens", "sync_sessions", "learned_transitions", "neural_vectors", "episodes"):
                     try:
                         conn.execute(f"DELETE FROM {tbl}")
                     except Exception:
                         pass
                 conn.commit()
+        self._last_good_snap = None
         self.append_log("Luna AI Brain reset to 0 memories.")
 
     def status_dict(self) -> dict:
@@ -603,6 +612,24 @@ def start_control_http_server(ctrl: LunaServerController):
                         self._send_bytes(200, "application/json; charset=utf-8", resp.read())
                 except Exception as e:
                     self._send_json(500, {"error": str(e)})
+            elif path_only == "/ctl/feedback":
+                if ctrl.is_running():
+                    try:
+                        req = urllib.request.Request(
+                            f"http://127.0.0.1:{SERVER_PORT}/api/feedback",
+                            method="POST",
+                            data=json.dumps({
+                                "anchor_concept": str(body.get("anchor_concept", "")),
+                                "is_positive": bool(body.get("is_positive", True)),
+                            }).encode("utf-8"),
+                            headers={"Content-Type": "application/json"},
+                        )
+                        with urllib.request.urlopen(req, timeout=3) as resp:
+                            self._send_bytes(200, "application/json; charset=utf-8", resp.read())
+                    except Exception as e:
+                        self._send_json(500, {"error": str(e)})
+                else:
+                    self._send_json(503, {"error": "Server paused"})
             elif path_only == "/ctl/publish":
                 try:
                     sec = int(body.get("estimated_seconds", 12))
