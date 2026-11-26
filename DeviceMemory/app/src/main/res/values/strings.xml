@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Shadow</string>
+    <string name="widget_description">Quick view of Luna on-device learned memories, life moments, and instant offline learning trigger.</string>
 </resources>

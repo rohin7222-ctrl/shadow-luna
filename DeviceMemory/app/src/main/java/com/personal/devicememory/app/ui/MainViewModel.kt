@@ -7,12 +7,15 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.personal.devicememory.app.update.ShadowUpdateService
 import com.personal.devicememory.app.update.ShadowUpdateState
+import com.personal.devicememory.app.widget.ShadowMemoryWidgetProvider
 import com.personal.devicememory.collector.audio.AcousticSpeakerClusterer
 import com.personal.devicememory.core.common.model.SourceType
 import com.personal.devicememory.core.database.DeviceMemoryDatabase
 import com.personal.devicememory.core.database.entity.CollectorConfigEntity
+import com.personal.devicememory.core.database.entity.EpisodeEntity
 import com.personal.devicememory.pipeline.CollectionWorker
 import com.personal.devicememory.pipeline.WorkScheduler
+import com.personal.devicememory.pipeline.brain.EpisodeStitchingEngine
 import com.personal.devicememory.pipeline.brain.LunaMemorySimulator
 import com.personal.devicememory.pipeline.brain.OnDeviceLunaBrain
 import com.personal.devicememory.pipeline.sync.LunaServerConfig
@@ -30,6 +33,7 @@ import kotlinx.coroutines.launch
 
 enum class ActiveScreen {
     MAIN_CHAT,
+    MOMENTS,
     LEARNING_PERMISSION,
     UPDATES
 }
@@ -101,12 +105,16 @@ data class MainUiState(
     val jepaAccuracyPct: Int = 0,
     val curiosityTarget: String = "",
     val topCausalChain: String = "",
+    val episodesCount: Int = 0,
+    val episodes: List<EpisodeEntity> = emptyList(),
+    val voiceTamilMode: Boolean = false,
     val topSimulatedTopics: List<String> = emptyList(),
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private var handshakeJob: Job? = null
+    private var statusClearJob: Job? = null
 
     private val _uiState = MutableStateFlow(
         MainUiState(
@@ -132,6 +140,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         jepaAccuracyPct = snap.jepaAccuracyPct,
                         curiosityTarget = snap.curiosityTarget,
                         topCausalChain = snap.topCausalChain,
+                        episodesCount = snap.episodesCount,
                         topSimulatedTopics = snap.topSimulatedConcepts
                     )
                 }
@@ -142,10 +151,45 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun navigateTo(screen: ActiveScreen) {
         _uiState.update { it.copy(activeScreen = screen) }
         when (screen) {
-            ActiveScreen.LEARNING_PERMISSION -> loadState()
+            ActiveScreen.MOMENTS, ActiveScreen.LEARNING_PERMISSION, ActiveScreen.MAIN_CHAT -> loadState()
             ActiveScreen.UPDATES -> checkForUpdates()
-            ActiveScreen.MAIN_CHAT -> loadState()
         }
+    }
+
+    fun toggleVoiceLanguage() {
+        _uiState.update { it.copy(voiceTamilMode = !it.voiceTamilMode) }
+    }
+
+    fun showStatus(msg: String) {
+        statusClearJob?.cancel()
+        _uiState.update { it.copy(statusMessage = msg) }
+        statusClearJob = viewModelScope.launch {
+            delay(3500L)
+            _uiState.update { st -> if (st.statusMessage == msg) st.copy(statusMessage = null) else st }
+        }
+    }
+
+    fun clearStatus() {
+        statusClearJob?.cancel()
+        _uiState.update { it.copy(statusMessage = null) }
+    }
+
+    fun stitchEpisodesNow() {
+        val app = getApplication<Application>()
+        viewModelScope.launch {
+            try {
+                val count = EpisodeStitchingEngine.stitchRecentFromDb(app, limit = 180)
+                loadState()
+                showStatus("Stitched $count life moments on phone.")
+            } catch (e: Throwable) {
+                Log.w(TAG, "Episode stitching failed", e)
+            }
+        }
+    }
+
+    fun askAboutMoment(prompt: String) {
+        _uiState.update { it.copy(activeScreen = ActiveScreen.MAIN_CHAT) }
+        sendOfflineMessage(prompt)
     }
 
     fun onAppForegrounded(justUpdated: Boolean) {
@@ -438,6 +482,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
                 val unsynced = try { db.collectedRecordDao().countUnsynced() } catch (_: Throwable) { 0 }
                 val tokenCount = try { db.learnedTokenDao().countTokens() } catch (_: Throwable) { 0 }
+                val recentEpisodes = try { db.brainSimulationDao().getRecentEpisodes(40) } catch (_: Throwable) { emptyList() }
+                val episodesCount = try { db.brainSimulationDao().countEpisodes() } catch (_: Throwable) { recentEpisodes.size }
 
                 _uiState.update {
                     it.copy(
@@ -445,11 +491,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         totalRecords = sources.sumOf { s -> s.recordCount },
                         totalTokens = tokenCount,
                         unsyncedRecords = unsynced,
+                        episodesCount = episodesCount,
+                        episodes = recentEpisodes,
                         serverUrl = LunaServerConfig.getServerUrl(app),
                         canDrawOverlays = Settings.canDrawOverlays(app),
                         installedVersion = ShadowUpdateState.getInstalledVersion(app)
                     )
                 }
+                ShadowMemoryWidgetProvider.refreshAllWidgets(app)
             } catch (e: Throwable) {
                 Log.e(TAG, "Unexpected error in loadState", e)
             }
@@ -542,10 +591,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         jepaAccuracyPct = 0,
                         curiosityTarget = "",
                         topCausalChain = "",
+                        episodesCount = 0,
+                        episodes = emptyList(),
                         topSimulatedTopics = emptyList(),
                         statusMessage = "Phone vault & offline AI wiped to 0"
                     )
                 }
+                ShadowMemoryWidgetProvider.refreshAllWidgets(app)
                 LunaMemorySimulator.startSimulationLoop(app)
                 loadState()
             } catch (e: Throwable) {

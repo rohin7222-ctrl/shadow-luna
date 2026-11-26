@@ -51,6 +51,7 @@ import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.Audiotrack
+import androidx.compose.material.icons.filled.AutoStories
 import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Contacts
@@ -58,6 +59,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Photo
@@ -126,16 +128,16 @@ import com.personal.devicememory.core.common.util.TimestampUtil
 import com.personal.devicememory.pipeline.sync.LunaUpdateItemDto
 
 // ─── 2026 Spatial Obsidian Glass Palette ───
-private val ObsidianBg = Color(0xFF06050B)
-private val GlassSurface = Color(0xFF10101C)
-private val GlassElevated = Color(0xFF171728)
-private val CyanAccent = Color(0xFF38BDF8)
-private val VioletAccent = Color(0xFF7C3AED)
-private val MintSuccess = Color(0xFF10B981)
-private val CoralDanger = Color(0xFFFF5252)
-private val TextPrimary = Color(0xFFF4F6FB)
-private val TextMuted = Color(0xFF94A3B8)
-private val HairlineBorder = Color.White.copy(alpha = 0.08f)
+internal val ObsidianBg = Color(0xFF06050B)
+internal val GlassSurface = Color(0xFF10101C)
+internal val GlassElevated = Color(0xFF171728)
+internal val CyanAccent = Color(0xFF38BDF8)
+internal val VioletAccent = Color(0xFF7C3AED)
+internal val MintSuccess = Color(0xFF10B981)
+internal val CoralDanger = Color(0xFFFF5252)
+internal val TextPrimary = Color(0xFFF4F6FB)
+internal val TextMuted = Color(0xFF94A3B8)
+internal val HairlineBorder = Color.White.copy(alpha = 0.08f)
 
 private val PrimaryGradBrush = Brush.linearGradient(listOf(CyanAccent, VioletAccent))
 
@@ -154,6 +156,11 @@ fun MainScreen(
     onToggleSource: (SourceType, Boolean) -> Unit,
     onCollectOfflineNow: () -> Unit,
     onChatFeedback: (Long, Boolean) -> Unit,
+    onStartVoiceInput: () -> Unit,
+    onToggleVoiceLanguage: () -> Unit,
+    onStitchEpisodesNow: () -> Unit,
+    onAskAboutMoment: (String) -> Unit,
+    onDismissStatus: () -> Unit,
     onDeleteAll: () -> Unit,
     onShowDeleteConfirmation: () -> Unit,
     onDismissDeleteConfirmation: () -> Unit,
@@ -231,6 +238,32 @@ fun MainScreen(
                                 }
                             },
                             actions = {
+                                Surface(
+                                    onClick = { onNavigate(ActiveScreen.MOMENTS) },
+                                    shape = RoundedCornerShape(999.dp),
+                                    color = GlassSurface,
+                                    border = BorderStroke(0.8.dp, if (uiState.episodesCount > 0) CyanAccent.copy(alpha = 0.35f) else HairlineBorder),
+                                    modifier = Modifier.padding(end = 6.dp)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                    ) {
+                                        Icon(
+                                            Icons.Default.AutoStories,
+                                            contentDescription = "Life Moments",
+                                            tint = if (uiState.episodesCount > 0) CyanAccent else TextMuted,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                        Text(
+                                            text = if (uiState.episodesCount > 0) "${uiState.episodesCount}" else "Moments",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = TextPrimary,
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                    }
+                                }
                                 Box(modifier = Modifier.padding(end = 6.dp)) {
                                     Surface(
                                         onClick = { menuExpanded = true },
@@ -301,6 +334,41 @@ fun MainScreen(
                                         )
                                         DropdownMenuItem(
                                             text = {
+                                                Row(
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                                ) {
+                                                    Text("Life Moments", color = TextPrimary, fontWeight = FontWeight.Medium)
+                                                    if (uiState.episodesCount > 0) {
+                                                        Surface(
+                                                            shape = RoundedCornerShape(999.dp),
+                                                            color = CyanAccent.copy(alpha = 0.16f)
+                                                        ) {
+                                                            Text(
+                                                                "${uiState.episodesCount}",
+                                                                style = MaterialTheme.typography.labelSmall,
+                                                                color = CyanAccent,
+                                                                fontWeight = FontWeight.Bold,
+                                                                modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
+                                                            )
+                                                        }
+                                                    }
+                                                }
+                                            },
+                                            leadingIcon = {
+                                                Icon(
+                                                    Icons.Default.AutoStories,
+                                                    contentDescription = null,
+                                                    tint = CyanAccent
+                                                )
+                                            },
+                                            onClick = {
+                                                menuExpanded = false
+                                                onNavigate(ActiveScreen.MOMENTS)
+                                            }
+                                        )
+                                        DropdownMenuItem(
+                                            text = {
                                                 Text(
                                                     "Learning Permission",
                                                     color = TextPrimary,
@@ -359,6 +427,39 @@ fun MainScreen(
                                             }
                                         )
                                     }
+                                }
+                            }
+                        )
+                    }
+
+                    ActiveScreen.MOMENTS -> {
+                        TopAppBar(
+                            colors = TopAppBarDefaults.topAppBarColors(
+                                containerColor = ObsidianBg,
+                                titleContentColor = TextPrimary
+                            ),
+                            navigationIcon = {
+                                IconButton(onClick = { onNavigate(ActiveScreen.MAIN_CHAT) }) {
+                                    Icon(
+                                        Icons.AutoMirrored.Filled.ArrowBack,
+                                        contentDescription = "Back",
+                                        tint = TextPrimary
+                                    )
+                                }
+                            },
+                            title = {
+                                Column {
+                                    Text("Life Moments", fontWeight = FontWeight.Bold)
+                                    Text(
+                                        "${uiState.episodesCount} stitched episodes • ${uiState.totalRecords} memories",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = CyanAccent
+                                    )
+                                }
+                            },
+                            actions = {
+                                IconButton(onClick = onStitchEpisodesNow) {
+                                    Icon(Icons.Default.Refresh, contentDescription = "Stitch Episodes", tint = CyanAccent)
                                 }
                             }
                         )
@@ -431,6 +532,25 @@ fun MainScreen(
                     }
                 }
                 HorizontalDivider(thickness = 0.6.dp, color = HairlineBorder)
+                val bannerMsg = uiState.statusMessage
+                if (!bannerMsg.isNullOrBlank()) {
+                    Surface(
+                        onClick = onDismissStatus,
+                        color = GlassElevated,
+                        border = BorderStroke(0.7.dp, CyanAccent.copy(alpha = 0.35f)),
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 6.dp)
+                    ) {
+                        Text(
+                            text = bannerMsg,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = CyanAccent,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                        )
+                    }
+                }
             }
         }
     ) { padding ->
@@ -465,8 +585,20 @@ fun MainScreen(
                         topPolicyStrategy = uiState.topPolicyStrategy,
                         topCausalChain = uiState.topCausalChain,
                         topTopics = uiState.topSimulatedTopics,
+                        voiceTamilMode = uiState.voiceTamilMode,
                         onSendMessage = onSendOfflineMessage,
-                        onFeedback = onChatFeedback
+                        onFeedback = onChatFeedback,
+                        onStartVoiceInput = onStartVoiceInput,
+                        onToggleVoiceLanguage = onToggleVoiceLanguage
+                    )
+                }
+
+                ActiveScreen.MOMENTS -> {
+                    MomentsTimelineSlide(
+                        uiState = uiState,
+                        onAskAboutMoment = onAskAboutMoment,
+                        onStitchNow = onStitchEpisodesNow,
+                        onOpenPermissions = { onNavigate(ActiveScreen.LEARNING_PERMISSION) }
                     )
                 }
 
@@ -550,8 +682,11 @@ private fun OfflineChatScreen(
     topPolicyStrategy: String,
     topCausalChain: String,
     topTopics: List<String>,
+    voiceTamilMode: Boolean,
     onSendMessage: (String) -> Unit,
-    onFeedback: (Long, Boolean) -> Unit
+    onFeedback: (Long, Boolean) -> Unit,
+    onStartVoiceInput: () -> Unit,
+    onToggleVoiceLanguage: () -> Unit
 ) {
     var inputText by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
@@ -817,7 +952,41 @@ private fun OfflineChatScreen(
                     )
                 }
 
-                Spacer(Modifier.width(8.dp))
+                Spacer(Modifier.width(6.dp))
+
+                Surface(
+                    onClick = onToggleVoiceLanguage,
+                    shape = RoundedCornerShape(999.dp),
+                    color = if (voiceTamilMode) VioletAccent.copy(alpha = 0.22f) else GlassElevated,
+                    border = BorderStroke(0.8.dp, if (voiceTamilMode) CyanAccent.copy(alpha = 0.50f) else HairlineBorder)
+                ) {
+                    Text(
+                        text = if (voiceTamilMode) "த" else "EN",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (voiceTamilMode) CyanAccent else TextMuted,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)
+                    )
+                }
+
+                Spacer(Modifier.width(4.dp))
+
+                IconButton(
+                    onClick = onStartVoiceInput,
+                    modifier = Modifier
+                        .size(38.dp)
+                        .clip(CircleShape)
+                        .background(GlassElevated)
+                ) {
+                    Icon(
+                        Icons.Default.Mic,
+                        contentDescription = if (voiceTamilMode) "Voice Ask Tamil" else "Voice Ask English",
+                        tint = CyanAccent,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+
+                Spacer(Modifier.width(6.dp))
 
                 val canSend = inputText.isNotBlank()
                 IconButton(

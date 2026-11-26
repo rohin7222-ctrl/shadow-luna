@@ -1,10 +1,13 @@
 package com.personal.devicememory.app
 
 import android.Manifest
+import android.app.Activity
+import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.speech.RecognizerIntent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -51,6 +54,20 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private val speechLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK && ::viewModel.isInitialized) {
+            val spoken = result.data
+                ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+                ?.firstOrNull()
+                ?.trim()
+            if (!spoken.isNullOrEmpty()) {
+                viewModel.sendOfflineMessage(spoken)
+            }
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -91,6 +108,11 @@ class MainActivity : ComponentActivity() {
                         },
                         onCollectOfflineNow = { viewModel.collectOfflineNow() },
                         onChatFeedback = { msgId, positive -> viewModel.submitChatFeedback(msgId, positive) },
+                        onStartVoiceInput = { startVoiceInput(uiState.voiceTamilMode) },
+                        onToggleVoiceLanguage = { viewModel.toggleVoiceLanguage() },
+                        onStitchEpisodesNow = { viewModel.stitchEpisodesNow() },
+                        onAskAboutMoment = { viewModel.askAboutMoment(it) },
+                        onDismissStatus = { viewModel.clearStatus() },
                         onDeleteAll = { viewModel.deleteAllData() },
                         onShowDeleteConfirmation = { viewModel.showDeleteConfirmation() },
                         onDismissDeleteConfirmation = { viewModel.dismissDeleteConfirmation() },
@@ -133,6 +155,28 @@ class MainActivity : ComponentActivity() {
         if (redirectIfUpdating()) return
         if (::viewModel.isInitialized) {
             viewModel.loadState()
+        }
+    }
+
+    private fun startVoiceInput(tamilMode: Boolean) {
+        val langTag = if (tamilMode) "ta-IN" else "en-IN"
+        val prompt = if (tamilMode) {
+            "தமிழில் அல்லது ஆங்கிலத்தில் கேளுங்கள்..."
+        } else {
+            "Ask Luna anything by voice..."
+        }
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, langTag)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, langTag)
+            putExtra(RecognizerIntent.EXTRA_PROMPT, prompt)
+        }
+        try {
+            speechLauncher.launch(intent)
+        } catch (_: ActivityNotFoundException) {
+            if (::viewModel.isInitialized) {
+                viewModel.showStatus("Speech recognizer unavailable on this device")
+            }
         }
     }
 

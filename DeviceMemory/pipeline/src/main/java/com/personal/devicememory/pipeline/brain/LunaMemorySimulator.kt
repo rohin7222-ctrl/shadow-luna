@@ -1,6 +1,7 @@
 package com.personal.devicememory.pipeline.brain
 
 import android.content.Context
+import android.os.PowerManager
 import android.util.Log
 import com.personal.devicememory.core.common.filter.SensitiveContentFilter
 import com.personal.devicememory.core.common.text.TemporalAnchorExtractor
@@ -95,7 +96,13 @@ object LunaMemorySimulator {
                 } catch (t: Throwable) {
                     Log.w(TAG, "Simulation pass warning", t)
                 }
-                val pauseMs = if (foregroundActive.get()) 6000L else 15000L
+                val pm = appContext.getSystemService(Context.POWER_SERVICE) as? PowerManager
+                val powerSave = pm?.isPowerSaveMode == true
+                val pauseMs = when {
+                    foregroundActive.get() -> 6000L
+                    powerSave -> 45000L
+                    else -> 15000L
+                }
                 delay(pauseMs)
             }
         }

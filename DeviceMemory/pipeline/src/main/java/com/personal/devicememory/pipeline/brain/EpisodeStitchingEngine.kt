@@ -1,6 +1,8 @@
 package com.personal.devicememory.pipeline.brain
 
+import android.content.Context
 import com.personal.devicememory.core.common.util.TimestampUtil
+import com.personal.devicememory.core.database.DeviceMemoryDatabase
 import com.personal.devicememory.core.database.entity.CollectedRecordEntity
 import com.personal.devicememory.core.database.entity.EpisodeEntity
 import kotlinx.serialization.json.Json
@@ -135,5 +137,23 @@ object EpisodeStitchingEngine {
                 updatedAt = nowMs
             )
         }
+    }
+
+    /**
+     * Loads recent records from encrypted Room vault, stitches cross-modal episodes, and upserts them.
+     */
+    suspend fun stitchRecentFromDb(context: Context, limit: Int = 160): Int {
+        val db = DeviceMemoryDatabase.getInstance(context)
+        val recent = db.collectedRecordDao().getRecentAll(limit)
+        if (recent.size < 2) return db.brainSimulationDao().countEpisodes()
+        val episodes = stitchEpisodes(
+            records = recent,
+            conceptExtractor = { src, txt -> LunaMemorySimulator.extractSemanticConcepts(src, txt) },
+            nowMs = TimestampUtil.nowMillis()
+        )
+        if (episodes.isNotEmpty()) {
+            db.brainSimulationDao().upsertEpisodes(episodes)
+        }
+        return db.brainSimulationDao().countEpisodes()
     }
 }

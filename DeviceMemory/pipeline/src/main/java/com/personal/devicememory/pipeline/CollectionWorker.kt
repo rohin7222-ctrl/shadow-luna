@@ -1,6 +1,11 @@
 package com.personal.devicememory.pipeline
 
+import android.appwidget.AppWidgetManager
+import android.content.ComponentName
 import android.content.Context
+import android.content.Intent
+import android.os.BatteryManager
+import android.os.PowerManager
 import android.util.Log
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
@@ -11,6 +16,7 @@ import com.personal.devicememory.core.common.util.TimestampUtil
 import com.personal.devicememory.core.database.DeviceMemoryDatabase
 import com.personal.devicememory.core.database.entity.CollectedRecordEntity
 import com.personal.devicememory.core.database.entity.SyncBookmarkEntity
+import com.personal.devicememory.pipeline.brain.EpisodeStitchingEngine
 import com.personal.devicememory.pipeline.brain.OnDeviceLunaBrain
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.contentOrNull
@@ -99,6 +105,24 @@ class CollectionWorker(
             val bytes = MessageDigest.getInstance("SHA-256").digest(input.toByteArray())
             return bytes.joinToString("") { "%02x".format(it) }
         }
+
+        internal fun isHeavyMediaSource(sourceType: SourceType): Boolean =
+            sourceType == SourceType.PHOTO || sourceType == SourceType.VIDEO || sourceType == SourceType.AUDIO
+
+        /**
+         * Throttles heavy ML media collectors (OCR, Video JEPA, MFCC audio) during automatic
+         * background runs when Battery Saver is active or unplugged battery falls below 20%.
+         */
+        internal fun shouldSkipForBattery(
+            sourceType: SourceType,
+            isManual: Boolean,
+            isPowerSaveMode: Boolean,
+            batteryPct: Int,
+            isCharging: Boolean
+        ): Boolean {
+            if (isManual || !isHeavyMediaSource(sourceType)) return false
+            return isPowerSaveMode || (!isCharging && batteryPct in 1..19)
+        }
     }
 
     override suspend fun doWork(): Result {
@@ -113,13 +137,26 @@ class CollectionWorker(
             return Result.success()
         }
 
+        val isManual = inputData.getBoolean(WorkScheduler.KEY_MANUAL_TRIGGER, false)
+        val pm = applicationContext.getSystemService(Context.POWER_SERVICE) as? PowerManager
+        val bm = applicationContext.getSystemService(Context.BATTERY_SERVICE) as? BatteryManager
+        val isPowerSave = pm?.isPowerSaveMode == true
+        val batteryPct = bm?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY) ?: 100
+        val isCharging = bm?.isCharging == true
+
         var allSuccess = true
+        var totalInserted = 0
 
         for (config in enabledConfigs) {
             val sourceType = try {
                 SourceType.valueOf(config.sourceType)
             } catch (e: IllegalArgumentException) {
                 Log.w(TAG, "Unknown source type: ${config.sourceType}")
+                continue
+            }
+
+            if (shouldSkipForBattery(sourceType, isManual, isPowerSave, batteryPct, isCharging)) {
+                Log.i(TAG, "Deferred heavy media collector $sourceType due to battery saver / low power ($batteryPct%)")
                 continue
             }
 
@@ -160,6 +197,7 @@ class CollectionWorker(
                         insertRowIds.getOrNull(idx)?.let { it >= 0L } == true
                     }
                     if (newlyInserted.isNotEmpty()) {
+                        totalInserted += newlyInserted.size
                         OnDeviceLunaBrain.learnFromRecords(db, newlyInserted)
                     }
 
@@ -194,6 +232,31 @@ class CollectionWorker(
                 )
             }
         }
+
+        if (totalInserted > 0) {
+            try {
+                EpisodeStitchingEngine.stitchRecentFromDb(applicationContext, limit = 160)
+            } catch (e: Throwable) {
+                Log.w(TAG, "Episode stitch after collection skipped", e)
+            }
+        }
+
+        // Notify any active Home Screen Memory Widgets to refresh counts cleanly
+        try {
+            val mgr = AppWidgetManager.getInstance(applicationContext)
+            val comp = ComponentName(
+                applicationContext.packageName,
+                "com.personal.devicememory.app.widget.ShadowMemoryWidgetProvider"
+            )
+            val ids = mgr.getAppWidgetIds(comp)
+            if (ids.isNotEmpty()) {
+                val updateIntent = Intent(AppWidgetManager.ACTION_APPWIDGET_UPDATE).apply {
+                    component = comp
+                    putExtra(AppWidgetManager.EXTRA_APPWIDGET_IDS, ids)
+                }
+                applicationContext.sendBroadcast(updateIntent)
+            }
+        } catch (_: Throwable) {}
 
         // Offline-first: data stays encrypted on-device until explicit 2-way handshake sync
         return if (allSuccess) Result.success() else Result.retry()

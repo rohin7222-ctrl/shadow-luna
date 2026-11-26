@@ -66,4 +66,13 @@ class CollectionWorkerIdentityTest {
         )
         assertEquals(now - 86_400_000L, calBookmark)
     }
+
+    @Test
+    fun batteryAwareThrottleProtectsMediaDuringBackgroundLowPower() {
+        assertTrue(CollectionWorker.shouldSkipForBattery(SourceType.PHOTO, isManual = false, isPowerSaveMode = true, batteryPct = 80, isCharging = false))
+        assertTrue(CollectionWorker.shouldSkipForBattery(SourceType.VIDEO, isManual = false, isPowerSaveMode = false, batteryPct = 15, isCharging = false))
+        assertTrue(!CollectionWorker.shouldSkipForBattery(SourceType.PHOTO, isManual = false, isPowerSaveMode = false, batteryPct = 15, isCharging = true))
+        assertTrue(!CollectionWorker.shouldSkipForBattery(SourceType.PHOTO, isManual = true, isPowerSaveMode = true, batteryPct = 10, isCharging = false))
+        assertTrue(!CollectionWorker.shouldSkipForBattery(SourceType.NOTIFICATION, isManual = false, isPowerSaveMode = true, batteryPct = 10, isCharging = false))
+    }
 }
