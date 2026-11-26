@@ -147,4 +147,25 @@ class OnDeviceLunaBrainTest {
         assertEquals("gallery", traj[0].first)
         assertEquals("whatsapp", traj[1].first)
     }
+
+    @Test
+    fun audioVideoSemanticConceptsAndNoiseFilteringWorkCleanly() {
+        val videoConcepts = LunaMemorySimulator.extractSemanticConcepts(
+            "VIDEO",
+            "Video: Camera - park_walk.mp4 (12s) [Moderate Motion, Bright / Outdoor, Green / Nature, HEVC, vis_098, Speech-Dominant VAD 68%, ac_019]"
+        )
+        assertTrue(videoConcepts.contains("motion"))
+        assertTrue(videoConcepts.contains("outdoor"))
+        assertTrue(videoConcepts.contains("hevc"))
+        assertTrue(videoConcepts.contains("speech"))
+        assertTrue(!videoConcepts.contains("vad"))
+
+        val audioConcepts = LunaMemorySimulator.extractSemanticConcepts(
+            "AUDIO",
+            "Audio: Voice Note (15s) [Speech-Dominant, VAD 72%, 1120Hz, ac_042]"
+        )
+        assertTrue(audioConcepts.contains("speech"))
+        assertTrue(!audioConcepts.contains("vad"))
+        assertTrue(!audioConcepts.contains("hz"))
+    }
 }

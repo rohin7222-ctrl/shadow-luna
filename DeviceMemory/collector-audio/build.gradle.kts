@@ -17,4 +17,5 @@ dependencies {
     implementation(project(":core-database"))
     implementation(libs.androidx.core.ktx)
     implementation(libs.kotlinx.serialization.json)
+    testImplementation(libs.junit)
 }

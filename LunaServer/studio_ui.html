@@ -1106,6 +1106,37 @@
                 top.appendChild(createEl('span', '', new Date(m.timestamp).toLocaleString()));
                 card.appendChild(top);
                 card.appendChild(createEl('div', 'mem-body', m.text_content || 'Metadata record'));
+                try {
+                    if (m.metadata_json) {
+                        const meta = JSON.parse(m.metadata_json);
+                        const av = meta.av_analysis || meta.audio_analysis;
+                        if (av) {
+                            const tags = [];
+                            if (av.motion_scene) tags.push(av.motion_scene);
+                            if (av.lighting_scene) tags.push(av.lighting_scene);
+                            if (av.audio_scene || av.acoustic_scene) tags.push(av.audio_scene || av.acoustic_scene);
+                            if (typeof av.speech_ratio === 'number') tags.push(`VAD ${Math.round(av.speech_ratio * 100)}%`);
+                            if (av.codec) tags.push(av.codec);
+                            if (av.visual_code) tags.push(av.visual_code);
+                            if (av.acoustic_code) tags.push(av.acoustic_code);
+                            if (tags.length > 0) {
+                                const row = createEl('div', '');
+                                row.style.display = 'flex';
+                                row.style.flexWrap = 'wrap';
+                                row.style.gap = '6px';
+                                row.style.marginTop = '4px';
+                                tags.forEach(t => {
+                                    const chip = createEl('span', 'mem-tag', t);
+                                    chip.style.fontSize = '0.72rem';
+                                    chip.style.background = 'rgba(0, 240, 255, 0.12)';
+                                    chip.style.color = '#80f8ff';
+                                    row.appendChild(chip);
+                                });
+                                card.appendChild(row);
+                            }
+                        }
+                    }
+                } catch (_) {}
                 grid.appendChild(card);
             });
         }

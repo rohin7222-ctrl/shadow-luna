@@ -63,7 +63,8 @@ object LunaMemorySimulator {
         "jpg", "jpeg", "png", "heic", "webp", "mp4", "mkv", "mp3", "m4a", "ogg",
         "sending", "file", "from", "with", "this", "that", "have", "your", "the",
         "and", "for", "are", "you", "new", "messages", "message", "chats", "chat",
-        "dcim", "emulated", "storage", "download", "downloads", "metadata", "null", "true", "false"
+        "dcim", "emulated", "storage", "download", "downloads", "metadata", "null", "true", "false",
+        "vad", "hz", "kbps", "dominant", "mix"
     )
 
     private val CONCEPT_WORD_REGEX = Regex("""[\p{L}\p{M}]{2,32}""")
@@ -171,7 +172,7 @@ object LunaMemorySimulator {
             if (w.length < 3 && !w.any { it.code in 0x0B80..0x0BFF }) continue
             if (w in NOISE_CONCEPTS) continue
             out.add(w)
-            if (out.size >= 10) break
+            if (out.size >= 14) break
         }
         // Always include clean app/domain cue if present in package name like com.sec.android.app.camera
         if (sourceType == "APP_USAGE") {

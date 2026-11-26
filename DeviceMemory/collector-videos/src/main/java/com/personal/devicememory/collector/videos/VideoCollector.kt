@@ -1,6 +1,7 @@
 package com.personal.devicememory.collector.videos
 
 import android.Manifest
+import android.content.ContentUris
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
@@ -44,7 +45,7 @@ class VideoCollector(
             return emptyList()
         }
 
-        val records = mutableListOf<CollectedRecord>()
+        val items = mutableListOf<VideoItem>()
         val projection = arrayOf(
             MediaStore.Video.Media._ID,
             MediaStore.Video.Media.DISPLAY_NAME,
@@ -101,27 +102,45 @@ class VideoCollector(
                     val dateTaken = if (dateTakenCol >= 0) c.getLong(dateTakenCol) else 0L
                     val dateAddedSec = if (dateAddedCol >= 0) c.getLong(dateAddedCol) else 0L
 
-                    val item = VideoItem(
-                        mediaId = mediaId,
-                        displayName = displayName,
-                        bucketName = bucketName,
-                        mimeType = mimeType,
-                        durationMs = durationMs,
-                        sizeBytes = sizeBytes,
-                        width = width,
-                        height = height,
-                        dateTaken = dateTaken,
-                        dateAdded = dateAddedSec * 1000
+                    items.add(
+                        VideoItem(
+                            mediaId = mediaId,
+                            displayName = displayName,
+                            bucketName = bucketName,
+                            mimeType = mimeType,
+                            durationMs = durationMs,
+                            sizeBytes = sizeBytes,
+                            width = width,
+                            height = height,
+                            dateTaken = dateTaken,
+                            dateAdded = dateAddedSec * 1000
+                        )
                     )
-
-                    records.add(VideoMapper.map(item))
                 }
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to query MediaStore for videos", e)
         }
 
-        Log.i(TAG, "Collected ${records.size} video metadata records")
+        // Deep V-JEPA keyframe & audio-track fusion budget: newest 16 videos per run
+        val deepStartIndex = (items.size - 16).coerceAtLeast(0)
+        val records = ArrayList<CollectedRecord>(items.size)
+        for (i in items.indices) {
+            val item = items[i]
+            val fused = if (i >= deepStartIndex && item.mediaId > 0L) {
+                val uri = ContentUris.withAppendedId(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, item.mediaId)
+                try {
+                    AndroidVideoFrameSampler.analyzeUri(context, uri, item.durationMs)
+                } catch (e: Exception) {
+                    Log.d(TAG, "Video A/V analysis skipped for ${item.mediaId}: ${e.message}")
+                    null
+                }
+            } else null
+
+            records.add(VideoMapper.map(item.copy(visual = fused?.visual, audio = fused?.audio)))
+        }
+
+        Log.i(TAG, "Collected ${records.size} video records (V-JEPA+AV analyzed=${items.size - deepStartIndex})")
         return records
     }
 }

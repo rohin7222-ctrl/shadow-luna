@@ -298,7 +298,7 @@ class CognitiveEngine:
                         (f"person:{title}", f"app:{pkg}", "INTERACTED_VIA", ts)
                     )
 
-        # 4. Extract Media nodes (Photos / Screenshots)
+        # 4. Extract Media nodes (Photos / Screenshots / 2026 Video V-JEPA + Audio Spectral Fusion)
         if source == "PHOTO":
             is_screenshot = meta.get("is_screenshot", False)
             node_type = "SCREENSHOT" if is_screenshot else "PHOTO"
@@ -307,6 +307,32 @@ class CognitiveEngine:
                 "ON CONFLICT(id) DO UPDATE SET mention_count = mention_count + 1, last_seen = ?",
                 (f"media:{record['id']}", text[:80], node_type, ts, ts)
             )
+        elif source in ("VIDEO", "AUDIO"):
+            c.execute(
+                "INSERT INTO graph_nodes (id, label, entity_type, last_seen) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET mention_count = mention_count + 1, last_seen = ?",
+                (f"media:{record['id']}", text[:90], source, ts, ts)
+            )
+            av = meta.get("av_analysis") if source == "VIDEO" else meta.get("audio_analysis")
+            if isinstance(av, dict):
+                av_tags = [
+                    av.get("motion_scene"),
+                    av.get("lighting_scene"),
+                    av.get("color_tone"),
+                    av.get("codec"),
+                    av.get("audio_scene"),
+                    av.get("acoustic_scene"),
+                    av.get("visual_code"),
+                    av.get("acoustic_code"),
+                ]
+                for tag in av_tags:
+                    if tag and isinstance(tag, str) and tag != "Neutral":
+                        clean_tag = tag.strip()
+                        c.execute(
+                            "INSERT INTO graph_nodes (id, label, entity_type, last_seen) VALUES (?, ?, ?, ?) "
+                            "ON CONFLICT(id) DO UPDATE SET mention_count = mention_count + 1, last_seen = ?",
+                            (f"av_scene:{clean_tag.lower()}", clean_tag, "AV_SCENE", ts, ts)
+                        )
 
         # 5. Update Latent User State
         c.execute(

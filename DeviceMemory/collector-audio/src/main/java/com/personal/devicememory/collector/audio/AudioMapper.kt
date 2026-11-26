@@ -13,7 +13,8 @@ data class AudioItem(
     val durationMs: Long,
     val sizeBytes: Long,
     val mimeType: String?,
-    val dateAdded: Long
+    val dateAdded: Long,
+    val analysis: AudioAnalysisResult? = null
 )
 
 object AudioMapper {
@@ -32,9 +33,28 @@ object AudioMapper {
             if (durationSec > 0) {
                 append(" (${durationSec}s)")
             }
+            val a = item.analysis
+            if (a != null) {
+                val vadPct = (a.speechRatio * 100.0).toInt().coerceIn(0, 100)
+                append(" [${a.acousticScene}, VAD ${vadPct}%, ${a.spectralCentroidHz}Hz, ${a.acousticCode}]")
+            }
         }
 
-        val metadata = mapOf<String, Any?>(
+        val analysisMap = item.analysis?.let { a ->
+            mapOf<String, Any?>(
+                "acoustic_scene" to a.acousticScene,
+                "speech_ratio" to a.speechRatio,
+                "spectral_centroid_hz" to a.spectralCentroidHz,
+                "spectral_flatness" to a.spectralFlatness,
+                "spectral_flux" to a.spectralFlux,
+                "rms_db" to a.rmsDb,
+                "acoustic_code" to a.acousticCode,
+                "mfcc_signature" to a.mfccSignature,
+                "mel_patch_latent" to a.melPatchLatent
+            )
+        }
+
+        val metadata = mutableMapOf<String, Any?>(
             "media_id" to item.mediaId,
             "display_name" to item.displayName,
             "title" to item.title,
@@ -45,6 +65,9 @@ object AudioMapper {
             "mime_type" to item.mimeType,
             "date_added" to item.dateAdded
         )
+        if (analysisMap != null) {
+            metadata["audio_analysis"] = analysisMap
+        }
 
         return CollectedRecord(
             sourceType = SourceType.AUDIO,

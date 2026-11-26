@@ -1,6 +1,7 @@
 package com.personal.devicememory.collector.audio
 
 import android.Manifest
+import android.content.ContentUris
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
@@ -44,7 +45,7 @@ class AudioCollector(
             return emptyList()
         }
 
-        val records = mutableListOf<CollectedRecord>()
+        val items = mutableListOf<AudioItem>()
         val projection = arrayOf(
             MediaStore.Audio.Media._ID,
             MediaStore.Audio.Media.DISPLAY_NAME,
@@ -97,26 +98,44 @@ class AudioCollector(
                     val mimeType = if (mimeCol >= 0) c.getString(mimeCol) else null
                     val dateAddedSec = if (dateAddedCol >= 0) c.getLong(dateAddedCol) else 0L
 
-                    val item = AudioItem(
-                        mediaId = mediaId,
-                        displayName = displayName,
-                        title = title,
-                        artist = artist,
-                        album = album,
-                        durationMs = durationMs,
-                        sizeBytes = sizeBytes,
-                        mimeType = mimeType,
-                        dateAdded = dateAddedSec * 1000
+                    items.add(
+                        AudioItem(
+                            mediaId = mediaId,
+                            displayName = displayName,
+                            title = title,
+                            artist = artist,
+                            album = album,
+                            durationMs = durationMs,
+                            sizeBytes = sizeBytes,
+                            mimeType = mimeType,
+                            dateAdded = dateAddedSec * 1000
+                        )
                     )
-
-                    records.add(AudioMapper.map(item))
                 }
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to query MediaStore for audio", e)
         }
 
-        Log.i(TAG, "Collected ${records.size} audio metadata records")
+        // Deep spectral & acoustic decode budget: newest 20 items per collection pass
+        val deepStartIndex = (items.size - 20).coerceAtLeast(0)
+        val records = ArrayList<CollectedRecord>(items.size)
+        for (i in items.indices) {
+            val item = items[i]
+            val analysis = if (i >= deepStartIndex && item.mediaId > 0L) {
+                val uri = ContentUris.withAppendedId(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, item.mediaId)
+                try {
+                    AndroidAudioDecoder.analyzeUri(context, uri)
+                } catch (e: Exception) {
+                    Log.d(TAG, "Spectral audio decode skipped for ${item.mediaId}: ${e.message}")
+                    null
+                }
+            } else null
+
+            records.add(AudioMapper.map(item.copy(analysis = analysis)))
+        }
+
+        Log.i(TAG, "Collected ${records.size} audio records (spectral analyzed=${items.size - deepStartIndex})")
         return records
     }
 }

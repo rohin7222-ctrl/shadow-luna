@@ -15,6 +15,8 @@ android {
 dependencies {
     implementation(project(":core-common"))
     implementation(project(":core-database"))
+    implementation(project(":collector-audio"))
     implementation(libs.androidx.core.ktx)
     implementation(libs.kotlinx.serialization.json)
+    testImplementation(libs.junit)
 }
