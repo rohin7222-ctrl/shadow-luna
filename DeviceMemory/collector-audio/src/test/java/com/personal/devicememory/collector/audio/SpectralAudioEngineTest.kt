@@ -91,6 +91,19 @@ class SpectralAudioEngineTest {
         assertTrue(text.contains("Speech-Dominant"))
         assertTrue(text.contains("VAD 72%"))
         assertTrue(text.contains("ac_042"))
-        assertTrue(record.metadataJson?.contains("audio_analysis") == true)
+        assertTrue(record.metadataJson?.contains("\"audio_analysis\":{") == true)
+    }
+
+    @Test
+    fun `stationary pure sine has near zero spectral flux and finite metrics despite NaN input`() {
+        val sr = 16000
+        val sine = FloatArray(4096) { i -> kotlin.math.sin(2.0 * PI * 440.0 * i / sr).toFloat() }
+        val sineRes = SpectralAudioEngine.analyzePcm(sine, sr)
+        assertTrue("Stationary sine should have low flux, got ${sineRes.spectralFlux}", sineRes.spectralFlux < 0.04)
+
+        val noisyNaN = FloatArray(1024) { Float.NaN }
+        val nanRes = SpectralAudioEngine.analyzePcm(noisyNaN, sr)
+        assertTrue(nanRes.speechRatio.isFinite())
+        assertTrue(nanRes.spectralFlux.isFinite())
     }
 }

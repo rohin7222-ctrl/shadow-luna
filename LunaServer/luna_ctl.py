@@ -9,6 +9,7 @@ import os
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -22,29 +23,44 @@ def _req(url: str, method: str = "GET", body: dict = None, timeout: float = 10.0
     data = json.dumps(body).encode("utf-8") if body is not None else (b"{}" if method == "POST" else None)
     headers = {"Content-Type": "application/json"} if data is not None else {}
     req = urllib.request.Request(url, method=method, data=data, headers=headers)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8"))
-
-
-def ensure_gui(wait_sec: float = 6.0) -> bool:
     try:
-        _req(f"{CTL_BASE}/ctl/status", timeout=0.8)
-        return True
-    except Exception:
-        pass
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        raw = ""
+        try:
+            raw = e.read().decode("utf-8", errors="replace")
+        except Exception:
+            pass
+        raise RuntimeError(f"HTTP {e.code}: {raw or e.reason}") from e
+    except Exception as e:
+        raise RuntimeError(str(e)) from e
 
-    exe = PYTHONW_EXE if os.path.exists(PYTHONW_EXE) else sys.executable
-    flags = getattr(subprocess, "DETACHED_PROCESS", 0x00000008) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
-    subprocess.Popen([exe, DESKTOP_SCRIPT], cwd=BASE_DIR, creationflags=flags, close_fds=True)
+
+def ensure_gui(wait_sec: float = 8.0, wait_server: bool = False) -> bool:
+    try:
+        st = _req(f"{CTL_BASE}/ctl/status", timeout=0.8)
+        if not wait_server or st.get("server_running"):
+            return True
+    except Exception:
+        exe = PYTHONW_EXE if os.path.exists(PYTHONW_EXE) else sys.executable
+        flags = getattr(subprocess, "DETACHED_PROCESS", 0x00000008) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+        subprocess.Popen([exe, DESKTOP_SCRIPT], cwd=BASE_DIR, creationflags=flags, close_fds=True)
 
     deadline = time.time() + wait_sec
     while time.time() < deadline:
         try:
-            _req(f"{CTL_BASE}/ctl/status", timeout=0.6)
-            return True
+            st = _req(f"{CTL_BASE}/ctl/status", timeout=0.6)
+            if not wait_server or st.get("server_running"):
+                return True
         except Exception:
-            time.sleep(0.25)
-    return False
+            pass
+        time.sleep(0.25)
+    try:
+        _req(f"{CTL_BASE}/ctl/status", timeout=0.6)
+        return True
+    except Exception:
+        return False
 
 
 def main():
@@ -69,61 +85,85 @@ def main():
 
     args = parser.parse_args()
 
-    if args.cmd == "open":
-        ok = ensure_gui()
-        if ok:
-            res = _req(f"{CTL_BASE}/ctl/focus", method="POST")
-            print(json.dumps({"gui_open": True, **res}, indent=2))
-        else:
-            print(json.dumps({"gui_open": False, "error": "GUI failed to respond on port 8765"}, indent=2))
-            sys.exit(1)
+    try:
+        if args.cmd == "open":
+            ok = ensure_gui()
+            if ok:
+                res = _req(f"{CTL_BASE}/ctl/focus", method="POST")
+                print(json.dumps({"gui_open": True, **res}, indent=2))
+            else:
+                print(json.dumps({"gui_open": False, "error": "GUI failed to respond on port 8765"}, indent=2))
+                sys.exit(1)
 
-    elif args.cmd == "status":
-        try:
-            print(json.dumps(_req(f"{CTL_BASE}/ctl/status"), indent=2, ensure_ascii=False))
-        except Exception:
-            # Check if standalone server on 8000 is running without GUI
+        elif args.cmd == "status":
             try:
-                st = _req(f"{SERVER_BASE}/api/state", timeout=1.0)
-                print(json.dumps({"gui_running": False, "server_running": True, **st}, indent=2, ensure_ascii=False))
+                print(json.dumps(_req(f"{CTL_BASE}/ctl/status"), indent=2, ensure_ascii=False))
             except Exception:
-                print(json.dumps({"gui_running": False, "server_running": False}, indent=2))
+                try:
+                    st = _req(f"{SERVER_BASE}/api/state", timeout=1.0)
+                    print(json.dumps({"gui_running": False, "server_running": True, **st}, indent=2, ensure_ascii=False))
+                except Exception:
+                    print(json.dumps({"gui_running": False, "server_running": False}, indent=2))
 
-    elif args.cmd == "on":
-        ensure_gui()
-        print(json.dumps(_req(f"{CTL_BASE}/ctl/start", method="POST"), indent=2, ensure_ascii=False))
+        elif args.cmd == "on":
+            if not ensure_gui(wait_server=True):
+                print(json.dumps({"ok": False, "error": "Studio GUI unavailable on port 8765"}, indent=2))
+                sys.exit(1)
+            print(json.dumps(_req(f"{CTL_BASE}/ctl/start", method="POST"), indent=2, ensure_ascii=False))
 
-    elif args.cmd == "off":
-        try:
-            print(json.dumps(_req(f"{CTL_BASE}/ctl/stop", method="POST"), indent=2, ensure_ascii=False))
-        except Exception:
-            print(json.dumps({"ok": True, "gui_running": False, "server_running": False, "message": "Studio already closed"}, indent=2))
+        elif args.cmd == "off":
+            try:
+                print(json.dumps(_req(f"{CTL_BASE}/ctl/stop", method="POST"), indent=2, ensure_ascii=False))
+            except Exception:
+                standalone_up = False
+                try:
+                    _req(f"{SERVER_BASE}/api/ping", timeout=0.6)
+                    standalone_up = True
+                except Exception:
+                    pass
+                print(json.dumps({
+                    "ok": not standalone_up,
+                    "gui_running": False,
+                    "server_running": standalone_up,
+                    "message": "Standalone server still active on port 8000 (Studio GUI closed)" if standalone_up else "Studio already closed"
+                }, indent=2))
+                if standalone_up:
+                    sys.exit(1)
 
-    elif args.cmd == "restart":
-        ensure_gui()
-        print(json.dumps(_req(f"{CTL_BASE}/ctl/restart", method="POST"), indent=2, ensure_ascii=False))
+        elif args.cmd == "restart":
+            if not ensure_gui(wait_server=True):
+                print(json.dumps({"ok": False, "error": "Studio GUI unavailable on port 8765"}, indent=2))
+                sys.exit(1)
+            print(json.dumps(_req(f"{CTL_BASE}/ctl/restart", method="POST"), indent=2, ensure_ascii=False))
 
-    elif args.cmd == "publish":
-        ensure_gui()
-        res = _req(
-            f"{CTL_BASE}/ctl/publish",
-            method="POST",
-            body={"title": args.title, "changelog": args.changelog, "estimated_seconds": args.seconds},
-        )
-        print(json.dumps(res, indent=2, ensure_ascii=False))
+        elif args.cmd == "publish":
+            if not ensure_gui(wait_server=True):
+                print(json.dumps({"ok": False, "error": "Studio GUI unavailable on port 8765"}, indent=2))
+                sys.exit(1)
+            res = _req(
+                f"{CTL_BASE}/ctl/publish",
+                method="POST",
+                body={"title": args.title, "changelog": args.changelog, "estimated_seconds": args.seconds},
+            )
+            print(json.dumps(res, indent=2, ensure_ascii=False))
 
-    elif args.cmd == "logs":
-        res = _req(f"{CTL_BASE}/ctl/logs")
-        for line in res.get("logs", [])[-50:]:
-            print(line)
+        elif args.cmd == "logs":
+            res = _req(f"{CTL_BASE}/ctl/logs")
+            for line in res.get("logs", [])[-50:]:
+                print(line)
 
-    elif args.cmd == "reset-brain":
-        ensure_gui()
-        print(json.dumps(_req(f"{CTL_BASE}/ctl/reset-brain", method="POST"), indent=2))
+        elif args.cmd == "reset-brain":
+            if not ensure_gui():
+                print(json.dumps({"ok": False, "error": "Studio GUI unavailable on port 8765"}, indent=2))
+                sys.exit(1)
+            print(json.dumps(_req(f"{CTL_BASE}/ctl/reset-brain", method="POST"), indent=2))
 
-    elif args.cmd == "chat":
-        res = _req(f"{SERVER_BASE}/api/chat", method="POST", body={"query": args.query})
-        print(json.dumps(res, indent=2, ensure_ascii=False))
+        elif args.cmd == "chat":
+            res = _req(f"{SERVER_BASE}/api/chat", method="POST", body={"query": args.query})
+            print(json.dumps(res, indent=2, ensure_ascii=False))
+    except Exception as e:
+        print(json.dumps({"ok": False, "error": str(e)}, indent=2, ensure_ascii=False))
+        sys.exit(1)
 
 
 if __name__ == "__main__":

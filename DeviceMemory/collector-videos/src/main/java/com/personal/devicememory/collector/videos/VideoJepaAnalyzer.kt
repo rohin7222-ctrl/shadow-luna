@@ -58,13 +58,18 @@ object VideoJepaAnalyzer {
 
         for (i in samples.indices) {
             val s = samples[i]
-            sumR += s.avgR
-            sumG += s.avgG
-            sumB += s.avgB
-            frameLums[i] = (0.299 * s.avgR + 0.587 * s.avgG + 0.114 * s.avgB).coerceIn(0.0, 1.0)
+            val r = s.avgR.takeIf { it.isFinite() }?.coerceIn(0.0, 1.0) ?: 0.0
+            val g = s.avgG.takeIf { it.isFinite() }?.coerceIn(0.0, 1.0) ?: 0.0
+            val b = s.avgB.takeIf { it.isFinite() }?.coerceIn(0.0, 1.0) ?: 0.0
+            sumR += r
+            sumG += g
+            sumB += b
+            frameLums[i] = (0.299 * r + 0.587 * g + 0.114 * b).coerceIn(0.0, 1.0)
             val len = min(PATCH_DIM, s.patch4x4Luma.size)
             for (d in 0 until len) {
-                meanPatch[d] += s.patch4x4Luma[d].toDouble().coerceIn(0.0, 1.0)
+                val raw = s.patch4x4Luma[d].toDouble()
+                val safePatch = if (raw.isFinite()) raw.coerceIn(0.0, 1.0) else 0.0
+                meanPatch[d] += safePatch
             }
         }
 
@@ -99,7 +104,9 @@ object VideoJepaAnalyzer {
 
             var l1 = 0.0
             for (d in 0 until len) {
-                l1 += abs(curr[d] - prev[d])
+                val cVal = curr[d].toDouble().let { if (it.isFinite()) it.coerceIn(0.0, 1.0) else 0.0 }
+                val pVal = prev[d].toDouble().let { if (it.isFinite()) it.coerceIn(0.0, 1.0) else 0.0 }
+                l1 += abs(cVal - pVal)
             }
             val avgL1 = l1 / len
             totalMotionL1 += avgL1
@@ -114,14 +121,16 @@ object VideoJepaAnalyzer {
             // z_hat_{t} = z_{t-1} + 0.65 * (z_{t-1} - z_{t-2})
             var errSq = 0.0
             for (d in 0 until len) {
-                val zPrev = prev[d].toDouble()
+                val zCurr = curr[d].toDouble().let { if (it.isFinite()) it.coerceIn(0.0, 1.0) else 0.0 }
+                val zPrev = prev[d].toDouble().let { if (it.isFinite()) it.coerceIn(0.0, 1.0) else 0.0 }
                 val pred = if (t >= 2 && d < samples[t - 2].patch4x4Luma.size) {
-                    val velocity = zPrev - samples[t - 2].patch4x4Luma[d].toDouble()
+                    val zPrev2 = samples[t - 2].patch4x4Luma[d].toDouble().let { if (it.isFinite()) it.coerceIn(0.0, 1.0) else 0.0 }
+                    val velocity = zPrev - zPrev2
                     (zPrev + 0.65 * velocity).coerceIn(0.0, 1.0)
                 } else {
                     zPrev
                 }
-                val diff = curr[d].toDouble() - pred
+                val diff = zCurr - pred
                 errSq += diff * diff
             }
             val rmsSurprise = sqrt(errSq / len).coerceIn(0.0, 1.0)
@@ -149,7 +158,7 @@ object VideoJepaAnalyzer {
             sceneCutCount = sceneCuts,
             colorTone = colorTone,
             codec = codec,
-            estimatedFps = estimatedFps?.let { (it * 10.0).roundToInt() / 10.0 },
+            estimatedFps = estimatedFps?.takeIf { it.isFinite() && it > 0.0 }?.let { (it * 10.0).roundToInt() / 10.0 },
             hasAudioTrack = hasAudioTrack,
             visualLatent16 = meanPatch.map { round4(it) },
             visualCode = visualCode
@@ -184,5 +193,5 @@ object VideoJepaAnalyzer {
         return String.format(Locale.US, "vis_%03d", bits and 0x7F)
     }
 
-    private fun round4(v: Double): Double = (v * 10000.0).roundToInt() / 10000.0
+    private fun round4(v: Double): Double = if (v.isFinite()) (v * 10000.0).roundToInt() / 10000.0 else 0.0
 }

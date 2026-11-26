@@ -6,13 +6,12 @@ import java.time.format.DateTimeFormatter
 
 object TimestampUtil {
 
-    private val DISPLAY_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
-        .withZone(ZoneId.systemDefault())
+    private val BASE_DISPLAY_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
 
     fun nowMillis(): Long = System.currentTimeMillis()
 
     fun formatForDisplay(epochMillis: Long): String =
-        DISPLAY_FORMAT.format(Instant.ofEpochMilli(epochMillis))
+        BASE_DISPLAY_FORMAT.withZone(ZoneId.systemDefault()).format(Instant.ofEpochMilli(epochMillis))
 
     fun startOfDayMillis(daysAgo: Int = 0): Long {
         val now = Instant.now().atZone(ZoneId.systemDefault())

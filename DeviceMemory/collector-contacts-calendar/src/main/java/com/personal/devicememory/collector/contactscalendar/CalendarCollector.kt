@@ -77,16 +77,17 @@ class CalendarCollector(
                 val now = TimestampUtil.nowMillis()
 
                 while (c.moveToNext()) {
-                    val eventId = if (idCol >= 0) c.getLong(idCol) else 0L
+                    val eventId = if (idCol >= 0 && !c.isNull(idCol)) c.getLong(idCol) else 0L
                     val rawTitle = (if (titleCol >= 0) c.getString(titleCol) else null) ?: "Untitled Event"
                     val rawDesc = if (descCol >= 0) c.getString(descCol) else null
-                    val location = if (locCol >= 0) c.getString(locCol) else null
-                    val dtStart = if (startCol >= 0) c.getLong(startCol) else now
-                    val dtEnd = if (endCol >= 0) c.getLong(endCol) else dtStart
-                    val allDay = if (allDayCol >= 0) c.getInt(allDayCol) == 1 else false
+                    val rawLocation = if (locCol >= 0) c.getString(locCol) else null
+                    val dtStart = if (startCol >= 0 && !c.isNull(startCol)) c.getLong(startCol) else now
+                    val dtEnd = if (endCol >= 0 && !c.isNull(endCol)) c.getLong(endCol) else dtStart
+                    val allDay = if (allDayCol >= 0 && !c.isNull(allDayCol)) c.getInt(allDayCol) == 1 else false
 
                     val title = SensitiveContentFilter.redact(rawTitle) ?: rawTitle
                     val description = SensitiveContentFilter.redact(rawDesc)
+                    val location = SensitiveContentFilter.redact(rawLocation)
 
                     val textContent = buildString {
                         append("Event: ").append(title)

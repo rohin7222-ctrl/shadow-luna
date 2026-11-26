@@ -25,16 +25,17 @@ class VideoCollector(
         const val TAG = "VideoCollector"
 
         fun hasPermission(context: Context): Boolean {
-            return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                ContextCompat.checkSelfPermission(
-                    context,
-                    Manifest.permission.READ_MEDIA_VIDEO
-                ) == PackageManager.PERMISSION_GRANTED
-            } else {
-                ContextCompat.checkSelfPermission(
-                    context,
-                    Manifest.permission.READ_EXTERNAL_STORAGE
-                ) == PackageManager.PERMISSION_GRANTED
+            return when {
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE -> {
+                    ContextCompat.checkSelfPermission(context, Manifest.permission.READ_MEDIA_VIDEO) == PackageManager.PERMISSION_GRANTED ||
+                        ContextCompat.checkSelfPermission(context, Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED) == PackageManager.PERMISSION_GRANTED
+                }
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU -> {
+                    ContextCompat.checkSelfPermission(context, Manifest.permission.READ_MEDIA_VIDEO) == PackageManager.PERMISSION_GRANTED
+                }
+                else -> {
+                    ContextCompat.checkSelfPermission(context, Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+                }
             }
         }
     }
@@ -59,13 +60,18 @@ class VideoCollector(
             MediaStore.Video.Media.DATE_ADDED
         )
 
-        val (selection, selectionArgs) = if (sinceTimestamp > 0) {
+        val pendingFilter = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            "${MediaStore.MediaColumns.IS_PENDING} = 0"
+        } else null
+        val timeFilter = if (sinceTimestamp > 0) {
             val sinceSeconds = sinceTimestamp / 1000
-            val query = "(${MediaStore.Video.Media.DATE_ADDED} > ?) OR (${MediaStore.Video.Media.DATE_TAKEN} > ?)"
-            query to arrayOf(sinceSeconds.toString(), sinceTimestamp.toString())
+            "((${MediaStore.Video.Media.DATE_ADDED} >= ?) OR (${MediaStore.Video.Media.DATE_TAKEN} > ?))" to
+                arrayOf(sinceSeconds.toString(), sinceTimestamp.toString())
         } else {
             null to null
         }
+        val selection = listOfNotNull(pendingFilter, timeFilter.first).joinToString(" AND ").ifEmpty { null }
+        val selectionArgs = timeFilter.second
 
         val sortOrder = "${MediaStore.Video.Media.DATE_ADDED} ASC"
 

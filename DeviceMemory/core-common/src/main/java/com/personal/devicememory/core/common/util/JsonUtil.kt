@@ -1,36 +1,42 @@
 package com.personal.devicememory.core.common.util
 
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 
 /**
- * Encode a map to JSON string. Useful for building metadata_json.
- * Full Unicode — no ASCII escaping, so Tamil text is preserved as-is.
+ * Encode a map to JSON string cleanly, preserving recursive nested maps/lists and full Unicode (Tamil/English).
+ * Guards non-finite Double/Float values (NaN / Infinity) as JSON `null`.
  */
-fun Map<String, Any?>.toJsonString(): String {
-    val jsonObject = buildJsonObject {
-        for ((key, value) in this@toJsonString) {
-            when (value) {
-                null -> put(key, JsonNull)
-                is String -> put(key, JsonPrimitive(value))
-                is Number -> put(key, JsonPrimitive(value))
-                is Boolean -> put(key, JsonPrimitive(value))
-                is List<*> -> put(key, buildJsonArray {
-                    for (item in value) {
-                        when (item) {
-                            is String -> add(JsonPrimitive(item))
-                            is Number -> add(JsonPrimitive(item))
-                            is Boolean -> add(JsonPrimitive(item))
-                            null -> add(JsonNull)
-                            else -> add(JsonPrimitive(item.toString()))
-                        }
-                    }
-                })
-                else -> put(key, JsonPrimitive(value.toString()))
+fun Map<String, Any?>.toJsonString(): String = toJsonElement(this).toString()
+
+private fun toJsonElement(value: Any?): JsonElement = when (value) {
+    null -> JsonNull
+    is JsonElement -> value
+    is String -> JsonPrimitive(value)
+    is Boolean -> JsonPrimitive(value)
+    is Double -> if (value.isFinite()) JsonPrimitive(value) else JsonNull
+    is Float -> if (value.isFinite()) JsonPrimitive(value) else JsonNull
+    is Number -> JsonPrimitive(value)
+    is Map<*, *> -> buildJsonObject {
+        for ((k, v) in value) {
+            if (k != null) {
+                put(k.toString(), toJsonElement(v))
             }
         }
     }
-    return jsonObject.toString()
+    is Iterable<*> -> buildJsonArray {
+        for (item in value) {
+            add(toJsonElement(item))
+        }
+    }
+    is Array<*> -> buildJsonArray {
+        for (item in value) {
+            add(toJsonElement(item))
+        }
+    }
+    else -> JsonPrimitive(value.toString())
 }

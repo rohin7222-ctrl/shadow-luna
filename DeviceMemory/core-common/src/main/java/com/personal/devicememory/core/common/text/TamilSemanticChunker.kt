@@ -56,6 +56,8 @@ object TamilSemanticChunker {
         overlapGraphemes: Int = 16
     ): List<Chunk> {
         if (text.isBlank()) return emptyList()
+        val safeMax = maxGraphemes.coerceAtLeast(1)
+        val safeOverlap = overlapGraphemes.coerceIn(0, (safeMax - 1).coerceAtLeast(0))
 
         val sentences = splitSentences(text)
         val chunks = mutableListOf<Chunk>()
@@ -63,14 +65,30 @@ object TamilSemanticChunker {
         var currentClusters = mutableListOf<String>()
         var chunkIndex = 0
 
+        fun flushCurrentClusters() {
+            val chunkText = currentClusters.joinToString("").trim()
+            if (chunkText.isNotEmpty()) {
+                chunks.add(
+                    Chunk(
+                        index = chunkIndex++,
+                        text = chunkText,
+                        graphemeCount = GraphemeUtil.graphemeLength(chunkText),
+                        isTamil = containsTamil(chunkText)
+                    )
+                )
+            }
+            currentClusters = mutableListOf()
+        }
+
         for (sentence in sentences) {
             val sentenceClusters = GraphemeUtil.toGraphemeClusters(sentence)
 
-            if (sentenceClusters.size > maxGraphemes) {
-                // If a single sentence exceeds the budget, slide a window over its clusters
+            if (sentenceClusters.size > safeMax) {
+                // Flush earlier sentences first so chunk order stays monotonically sequential
+                flushCurrentClusters()
                 var offset = 0
                 while (offset < sentenceClusters.size) {
-                    val end = minOf(offset + maxGraphemes, sentenceClusters.size)
+                    val end = minOf(offset + safeMax, sentenceClusters.size)
                     val slice = sentenceClusters.subList(offset, end)
                     val chunkText = slice.joinToString("")
                     chunks.add(
@@ -82,33 +100,21 @@ object TamilSemanticChunker {
                         )
                     )
                     if (end == sentenceClusters.size) break
-                    offset += (maxGraphemes - overlapGraphemes).coerceAtLeast(1)
+                    offset += (safeMax - safeOverlap).coerceAtLeast(1)
                 }
-            } else if (currentClusters.size + sentenceClusters.size <= maxGraphemes) {
+            } else if (currentClusters.size + sentenceClusters.size <= safeMax) {
                 currentClusters.addAll(sentenceClusters)
-                // Add a space between sentences if not already ending in whitespace
                 currentClusters.add(" ")
             } else {
-                // Emit current chunk
-                val chunkText = currentClusters.joinToString("").trim()
-                if (chunkText.isNotEmpty()) {
-                    chunks.add(
-                        Chunk(
-                            index = chunkIndex++,
-                            text = chunkText,
-                            graphemeCount = GraphemeUtil.graphemeLength(chunkText),
-                            isTamil = containsTamil(chunkText)
-                        )
-                    )
-                }
+                val previousClusters = currentClusters
+                flushCurrentClusters()
 
-                // Overlap: retain trailing clusters strictly within remaining budget
-                val maxAllowedOverlap = (maxGraphemes - sentenceClusters.size).coerceAtLeast(0)
-                val effectiveOverlap = overlapGraphemes.coerceAtMost(maxAllowedOverlap)
-                val overlap = if (currentClusters.size > effectiveOverlap) {
-                    currentClusters.takeLast(effectiveOverlap)
+                val maxAllowedOverlap = (safeMax - sentenceClusters.size).coerceAtLeast(0)
+                val effectiveOverlap = safeOverlap.coerceAtMost(maxAllowedOverlap)
+                val overlap = if (previousClusters.size > effectiveOverlap) {
+                    previousClusters.takeLast(effectiveOverlap)
                 } else {
-                    currentClusters
+                    previousClusters
                 }
                 currentClusters = overlap.toMutableList()
                 currentClusters.addAll(sentenceClusters)
@@ -116,19 +122,7 @@ object TamilSemanticChunker {
             }
         }
 
-        // Final lingering chunk
-        val remainingText = currentClusters.joinToString("").trim()
-        if (remainingText.isNotEmpty()) {
-            chunks.add(
-                Chunk(
-                    index = chunkIndex,
-                    text = remainingText,
-                    graphemeCount = GraphemeUtil.graphemeLength(remainingText),
-                    isTamil = containsTamil(remainingText)
-                )
-            )
-        }
-
+        flushCurrentClusters()
         return chunks
     }
 

@@ -1,10 +1,12 @@
 package com.personal.devicememory.collector.audio
 
 import android.content.Context
+import android.media.AudioFormat
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.net.Uri
+import android.os.Build
 import android.util.Log
 import java.nio.ByteOrder
 import kotlin.math.min
@@ -59,6 +61,9 @@ object AndroidAudioDecoder {
             var channels = if (audioFormat.containsKey(MediaFormat.KEY_CHANNEL_COUNT)) {
                 audioFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT).coerceIn(1, 8)
             } else 1
+            var pcmEncoding = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && audioFormat.containsKey(MediaFormat.KEY_PCM_ENCODING)) {
+                audioFormat.getInteger(MediaFormat.KEY_PCM_ENCODING)
+            } else AudioFormat.ENCODING_PCM_16BIT
 
             val pcmOut = ArrayList<Float>(MAX_OUTPUT_SAMPLES)
             val info = MediaCodec.BufferInfo()
@@ -81,6 +86,8 @@ object AndroidAudioDecoder {
                                 codec.queueInputBuffer(inIdx, 0, chunkSize, extractor.sampleTime, 0)
                                 extractor.advance()
                             }
+                        } else {
+                            codec.queueInputBuffer(inIdx, 0, 0, 0L, 0)
                         }
                     }
                 }
@@ -95,24 +102,65 @@ object AndroidAudioDecoder {
                     if (outFmt.containsKey(MediaFormat.KEY_CHANNEL_COUNT)) {
                         channels = outFmt.getInteger(MediaFormat.KEY_CHANNEL_COUNT).coerceIn(1, 8)
                     }
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && outFmt.containsKey(MediaFormat.KEY_PCM_ENCODING)) {
+                        pcmEncoding = outFmt.getInteger(MediaFormat.KEY_PCM_ENCODING)
+                    }
                 } else if (outIdx >= 0) {
                     val outBuf = codec.getOutputBuffer(outIdx)
                     if (outBuf != null && info.size > 0) {
                         outBuf.position(info.offset)
                         outBuf.limit(info.offset + info.size)
-                        val shortBuf = outBuf.order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
-                        val totalShorts = shortBuf.remaining()
-                        var i = 0
-                        while (i + channels <= totalShorts && pcmOut.size < MAX_OUTPUT_SAMPLES) {
-                            if (sampleCounter % decimatedStep == 0) {
-                                var monoSum = 0f
-                                for (c in 0 until channels) {
-                                    monoSum += shortBuf.get(i + c) / 32768f
+                        outBuf.order(ByteOrder.LITTLE_ENDIAN)
+                        when (pcmEncoding) {
+                            AudioFormat.ENCODING_PCM_FLOAT -> {
+                                val fBuf = outBuf.asFloatBuffer()
+                                val totalFloats = fBuf.remaining()
+                                var i = 0
+                                while (i + channels <= totalFloats && pcmOut.size < MAX_OUTPUT_SAMPLES) {
+                                    if (sampleCounter % decimatedStep == 0) {
+                                        var monoSum = 0f
+                                        for (c in 0 until channels) {
+                                            val sample = fBuf.get(i + c)
+                                            monoSum += if (sample.isFinite()) sample.coerceIn(-1f, 1f) else 0f
+                                        }
+                                        pcmOut.add(monoSum / channels)
+                                    }
+                                    sampleCounter++
+                                    i += channels
                                 }
-                                pcmOut.add(monoSum / channels)
                             }
-                            sampleCounter++
-                            i += channels
+                            AudioFormat.ENCODING_PCM_8BIT -> {
+                                val totalBytes = outBuf.remaining()
+                                var i = 0
+                                while (i + channels <= totalBytes && pcmOut.size < MAX_OUTPUT_SAMPLES) {
+                                    if (sampleCounter % decimatedStep == 0) {
+                                        var monoSum = 0f
+                                        for (c in 0 until channels) {
+                                            val uByte = outBuf.get(info.offset + i + c).toInt() and 0xFF
+                                            monoSum += (uByte - 128) / 128f
+                                        }
+                                        pcmOut.add(monoSum / channels)
+                                    }
+                                    sampleCounter++
+                                    i += channels
+                                }
+                            }
+                            else -> {
+                                val shortBuf = outBuf.asShortBuffer()
+                                val totalShorts = shortBuf.remaining()
+                                var i = 0
+                                while (i + channels <= totalShorts && pcmOut.size < MAX_OUTPUT_SAMPLES) {
+                                    if (sampleCounter % decimatedStep == 0) {
+                                        var monoSum = 0f
+                                        for (c in 0 until channels) {
+                                            monoSum += shortBuf.get(i + c) / 32768f
+                                        }
+                                        pcmOut.add(monoSum / channels)
+                                    }
+                                    sampleCounter++
+                                    i += channels
+                                }
+                            }
                         }
                     }
                     codec.releaseOutputBuffer(outIdx, false)

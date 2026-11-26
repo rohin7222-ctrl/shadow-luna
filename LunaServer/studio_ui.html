@@ -907,8 +907,8 @@
 
             <!-- View 3: Connect to App Handshake Stage -->
             <section class="view" id="view-connect">
-                <div class="page-scroll" style="display:flex;align-items:center;justify-content:center;">
-                    <div class="connect-stage">
+                <div class="page-scroll" style="display:flex;">
+                    <div class="connect-stage" style="margin:auto;">
                         <div class="radar-wrap" id="radar-wrap">
                             <div class="radar-ring"></div>
                             <img src="/studio/logo.png" alt="" style="width:68px;height:68px;border-radius:18px;z-index:1;">
@@ -986,8 +986,16 @@
     </dialog>
 
     <script>
-        let latestSnapshot = { memories: [], tokens: [], nodes: [], sessions: [], memories_count: 0, tokens_count: 0, nodes_count: 0 };
+        let latestSnapshot = { memories: [], tokens: [], nodes: [], sessions: [], transitions: [], memories_count: 0, tokens_count: 0, nodes_count: 0 };
         let currentPhase = 'IDLE';
+        let completedTimer = null;
+        let settingsCloseTimer = null;
+        let pollTimer = null;
+        let pollInFlight = false;
+        let lastTokenSig = '';
+        let lastTransSig = '';
+        let lastMemSig = '';
+        let fwStatusPinnedUntil = 0;
 
         function openModal(id) {
             const dlg = document.getElementById(id);
@@ -995,6 +1003,9 @@
         }
 
         function openSettingsModal() {
+            if (settingsCloseTimer) { clearTimeout(settingsCloseTimer); settingsCloseTimer = null; }
+            const statusEl = document.getElementById('settings-status');
+            if (statusEl) statusEl.textContent = '';
             openModal('settings-dialog');
         }
 
@@ -1016,13 +1027,20 @@
             const opts = { method, headers: { 'Content-Type': 'application/json' } };
             if (body !== null) opts.body = JSON.stringify(body);
             const res = await fetch(path, opts);
-            return await res.json();
+            let data = {};
+            try { data = await res.json(); } catch (_) {}
+            if (!res.ok) {
+                throw new Error(data.error || data.message || `HTTP ${res.status}`);
+            }
+            return data;
         }
 
         async function toggleEngine() {
-            const isCurrentlyOn = document.getElementById('engine-toggle').classList.contains('on');
-            await apiCall(isCurrentlyOn ? '/ctl/stop' : '/ctl/start', 'POST', {});
-            await pollAll();
+            try {
+                const isCurrentlyOn = document.getElementById('engine-toggle').classList.contains('on');
+                await apiCall(isCurrentlyOn ? '/ctl/stop' : '/ctl/start', 'POST', {});
+                await pollAll();
+            } catch (_) {}
         }
 
         async function sendChat() {
@@ -1041,19 +1059,24 @@
 
             try {
                 const data = await apiCall('/ctl/chat', 'POST', { query: q });
+                const reply = data.response || data.error || 'No response received from engine.';
                 const cls = data.learned ? 'msg luna learned' : 'msg luna';
-                container.appendChild(createEl('div', cls, data.response || ''));
+                container.appendChild(createEl('div', cls, reply));
             } catch (e) {
-                container.appendChild(createEl('div', 'msg luna', 'Background engine is paused. Turn it on at bottom-left.'));
+                container.appendChild(createEl('div', 'msg luna', 'Background engine is paused or busy. Turn it on at bottom-left.'));
             }
             scroller.scrollTop = scroller.scrollHeight;
         }
 
         function renderTokens() {
             const q = (document.getElementById('token-search').value || '').trim().toLowerCase();
+            const filtered = (latestSnapshot.tokens || []).filter(t => !q || t.token.toLowerCase().includes(q));
+            const sig = q + '|' + filtered.map(t => `${t.token}:${t.frequency}`).join(',');
+            if (sig === lastTokenSig) return;
+            lastTokenSig = sig;
+
             const cloud = document.getElementById('token-cloud');
             cloud.replaceChildren();
-            const filtered = (latestSnapshot.tokens || []).filter(t => !q || t.token.toLowerCase().includes(q));
             if (filtered.length === 0) {
                 cloud.appendChild(createEl('p', '', 'No tokens learned yet. Connect your Shadow mobile app to sync.'));
                 cloud.lastChild.style.color = 'var(--text-muted)';
@@ -1071,8 +1094,12 @@
         function renderTransitions() {
             const cloud = document.getElementById('causal-cloud');
             if (!cloud) return;
-            cloud.replaceChildren();
             const list = latestSnapshot.transitions || [];
+            const sig = list.map(tr => `${tr.from_concept}->${tr.to_concept}:${tr.transition_count}`).join(',');
+            if (sig === lastTransSig) return;
+            lastTransSig = sig;
+
+            cloud.replaceChildren();
             if (list.length === 0) {
                 const p = createEl('p', '', 'No causal sequences learned yet.');
                 p.style.color = 'var(--text-muted)';
@@ -1090,8 +1117,12 @@
 
         function renderMemories() {
             const grid = document.getElementById('memory-cards');
-            grid.replaceChildren();
             const list = latestSnapshot.memories || [];
+            const sig = list.map(m => `${m.id}:${m.timestamp}`).join(',');
+            if (sig === lastMemSig) return;
+            lastMemSig = sig;
+
+            grid.replaceChildren();
             if (list.length === 0) {
                 const p = createEl('p', '', '0 memories stored yet.');
                 p.style.color = 'var(--text-muted)';
@@ -1110,7 +1141,7 @@
                     if (m.metadata_json) {
                         const meta = JSON.parse(m.metadata_json);
                         const av = meta.av_analysis || meta.audio_analysis;
-                        if (av) {
+                        if (av && typeof av === 'object') {
                             const tags = [];
                             if (av.motion_scene) tags.push(av.motion_scene);
                             if (av.lighting_scene) tags.push(av.lighting_scene);
@@ -1144,21 +1175,34 @@
         async function triggerConnectToApp() {
             const connectNavBtn = document.querySelectorAll('.nav-btn')[2];
             switchView('connect', connectNavBtn);
-            await apiCall('/ctl/connect-app', 'POST', {});
-            await pollAll();
+            try {
+                await apiCall('/ctl/connect-app', 'POST', {});
+                await pollAll();
+            } catch (e) {
+                const desc = document.getElementById('hs-desc');
+                if (desc) desc.textContent = 'Could not reach local sync engine: ' + e.message;
+            }
         }
 
         async function cancelConnect() {
-            await apiCall('/ctl/cancel-connect', 'POST', {});
-            await pollAll();
+            if (completedTimer) { clearTimeout(completedTimer); completedTimer = null; }
+            try {
+                await apiCall('/ctl/cancel-connect', 'POST', {});
+                await pollAll();
+            } catch (_) {}
         }
 
         async function confirmResetBrain() {
-            await apiCall('/ctl/reset-brain', 'POST', {});
-            document.querySelectorAll('#chat-messages .msg').forEach(el => el.remove());
-            const hero = document.getElementById('empty-hero');
-            if (hero) hero.style.display = 'flex';
-            await pollAll();
+            try {
+                await apiCall('/ctl/reset-brain', 'POST', {});
+                document.querySelectorAll('#chat-messages .msg').forEach(el => el.remove());
+                const hero = document.getElementById('empty-hero');
+                if (hero) hero.style.display = 'flex';
+                lastTokenSig = '';
+                lastTransSig = '';
+                lastMemSig = '';
+                await pollAll();
+            } catch (_) {}
         }
 
         async function pushUpdate() {
@@ -1169,7 +1213,8 @@
             try {
                 const res = await apiCall('/ctl/publish', 'POST', { title, changelog, estimated_seconds: 12 });
                 if (statusEl) statusEl.textContent = res.version ? `Published v${res.version} for Shadow Mobile.` : 'Update published.';
-                setTimeout(() => document.getElementById('settings-dialog').close(), 900);
+                if (settingsCloseTimer) clearTimeout(settingsCloseTimer);
+                settingsCloseTimer = setTimeout(() => document.getElementById('settings-dialog').close(), 900);
             } catch (e) {
                 if (statusEl) statusEl.textContent = 'Could not publish update.';
             }
@@ -1178,11 +1223,13 @@
         async function allowFirewall() {
             const statusEl = document.getElementById('settings-status');
             const fwStatus = document.getElementById('fw-action-status');
+            fwStatusPinnedUntil = Date.now() + 6000;
             if (statusEl) statusEl.textContent = 'Opening Windows Firewall prompt...';
             if (fwStatus) { fwStatus.style.display = 'block'; fwStatus.textContent = 'Approve the Windows admin prompt (Yes)...'; }
             try {
                 const res = await apiCall('/ctl/firewall', 'POST', {});
                 const msg = res.message || (res.ok ? 'Firewall Allowed ✓' : 'Failed to allow firewall.');
+                fwStatusPinnedUntil = Date.now() + 5000;
                 if (statusEl) statusEl.textContent = msg;
                 if (fwStatus) fwStatus.textContent = msg;
                 await pollAll();
@@ -1194,6 +1241,7 @@
 
         async function enableUsbBridge() {
             const fwStatus = document.getElementById('fw-action-status');
+            fwStatusPinnedUntil = Date.now() + 6000;
             if (fwStatus) { fwStatus.style.display = 'block'; fwStatus.textContent = 'Linking USB ADB tunnel...'; }
             try {
                 const res = await apiCall('/ctl/adb-bridge', 'POST', {});
@@ -1247,9 +1295,9 @@
                 const pct = total > 0 ? Math.min(100, Math.max(8, (recv / total) * 100)) : 65;
                 fill.style.width = pct + '%';
                 stageBtn.style.display = 'none';
-                cancelBtn.style.display = 'none';
-            } else if (phase === 'COMPLETED' && currentPhase === 'TRANSFERRING') {
-                sideLbl.textContent = 'Connect to App';
+                cancelBtn.style.display = 'inline-block';
+            } else if (phase === 'COMPLETED') {
+                sideLbl.textContent = 'Synced ✓';
                 radar.classList.remove('animating');
                 title.textContent = 'Learning Progress Saved';
                 desc.textContent = hs.last_message || 'Permanently stored on this laptop.';
@@ -1257,10 +1305,14 @@
                 fill.style.width = '100%';
                 stageBtn.style.display = 'inline-block';
                 cancelBtn.style.display = 'none';
-                setTimeout(() => {
-                    const memNav = document.querySelectorAll('.nav-btn')[1];
-                    switchView('memory', memNav);
-                }, 1300);
+                if (currentPhase !== 'COMPLETED') {
+                    if (completedTimer) clearTimeout(completedTimer);
+                    completedTimer = setTimeout(() => {
+                        completedTimer = null;
+                        const memNav = document.querySelectorAll('.nav-btn')[1];
+                        switchView('memory', memNav);
+                    }, 1300);
+                }
             } else {
                 sideLbl.textContent = 'Connect to App';
                 radar.classList.remove('animating');
@@ -1274,9 +1326,13 @@
         }
 
         async function pollAll() {
+            if (pollInFlight) return;
+            pollInFlight = true;
             try {
                 const st = await apiCall('/ctl/studio-data');
-                latestSnapshot = st.snapshot || latestSnapshot;
+                if (st.snapshot && !st.snapshot.error) {
+                    latestSnapshot = st.snapshot;
+                }
 
                 const on = !!st.server_running;
                 document.getElementById('engine-dot').classList.toggle('on', on);
@@ -1297,10 +1353,13 @@
                 const fwBox = document.getElementById('fw-warning-box');
                 const fwText = document.getElementById('fw-warn-text');
                 if (fwBox && st.firewall) {
-                    if (st.firewall.blocked_likely) {
+                    const keepOpen = Date.now() < fwStatusPinnedUntil;
+                    if (st.firewall.blocked_likely || keepOpen) {
                         fwBox.style.display = 'flex';
                         if (fwText) {
-                            fwText.textContent = `Windows Firewall (${st.firewall.wifi_profile} Wi-Fi) is blocking incoming phone connections on port 8000. Click below once to allow.`;
+                            fwText.textContent = st.firewall.blocked_likely
+                                ? `Windows Firewall (${st.firewall.wifi_profile} Wi-Fi) is blocking incoming phone connections on port 8000. Click below once to allow.`
+                                : `Windows Firewall (${st.firewall.wifi_profile} Wi-Fi) rule enabled for port 8000.`;
                         }
                     } else {
                         fwBox.style.display = 'none';
@@ -1320,11 +1379,17 @@
                 renderTransitions();
                 renderMemories();
                 updateHandshakeUi(st.handshake, st.lan_url);
-            } catch (e) {}
+            } catch (_) {
+            } finally {
+                pollInFlight = false;
+            }
         }
 
-        pollAll();
-        setInterval(pollAll, 900);
+        async function schedulePollLoop() {
+            await pollAll();
+            pollTimer = setTimeout(schedulePollLoop, 900);
+        }
+        schedulePollLoop();
     </script>
 </body>
 </html>

@@ -1,7 +1,6 @@
 package com.personal.devicememory.collector.photos
 
 import android.Manifest
-import android.content.ContentUris
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
@@ -13,7 +12,7 @@ import com.personal.devicememory.core.common.model.CollectedRecord
 
 /**
  * Collects metadata for photos and screenshots from [MediaStore.Images].
- * Supports incremental querying using date bounds.
+ * Supports incremental querying using date bounds and Android 14+ partial selection.
  */
 class PhotoCollector(
     private val context: Context
@@ -25,16 +24,17 @@ class PhotoCollector(
         const val TAG = "PhotoCollector"
 
         fun hasPermission(context: Context): Boolean {
-            return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                ContextCompat.checkSelfPermission(
-                    context,
-                    Manifest.permission.READ_MEDIA_IMAGES
-                ) == PackageManager.PERMISSION_GRANTED
-            } else {
-                ContextCompat.checkSelfPermission(
-                    context,
-                    Manifest.permission.READ_EXTERNAL_STORAGE
-                ) == PackageManager.PERMISSION_GRANTED
+            return when {
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE -> {
+                    ContextCompat.checkSelfPermission(context, Manifest.permission.READ_MEDIA_IMAGES) == PackageManager.PERMISSION_GRANTED ||
+                        ContextCompat.checkSelfPermission(context, Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED) == PackageManager.PERMISSION_GRANTED
+                }
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU -> {
+                    ContextCompat.checkSelfPermission(context, Manifest.permission.READ_MEDIA_IMAGES) == PackageManager.PERMISSION_GRANTED
+                }
+                else -> {
+                    ContextCompat.checkSelfPermission(context, Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+                }
             }
         }
     }
@@ -58,14 +58,19 @@ class PhotoCollector(
             MediaStore.Images.Media.HEIGHT
         )
 
-        // MediaStore DATE_ADDED is in seconds, DATE_TAKEN is in milliseconds
-        val (selection, selectionArgs) = if (sinceTimestamp > 0) {
+        // MediaStore DATE_ADDED is in seconds (>= prevents same-second burst loss; deduplicated downstream)
+        val pendingFilter = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            "${MediaStore.MediaColumns.IS_PENDING} = 0"
+        } else null
+        val timeFilter = if (sinceTimestamp > 0) {
             val sinceSeconds = sinceTimestamp / 1000
-            val query = "(${MediaStore.Images.Media.DATE_ADDED} > ?) OR (${MediaStore.Images.Media.DATE_TAKEN} > ?)"
-            query to arrayOf(sinceSeconds.toString(), sinceTimestamp.toString())
+            "((${MediaStore.Images.Media.DATE_ADDED} >= ?) OR (${MediaStore.Images.Media.DATE_TAKEN} > ?))" to
+                arrayOf(sinceSeconds.toString(), sinceTimestamp.toString())
         } else {
             null to null
         }
+        val selection = listOfNotNull(pendingFilter, timeFilter.first).joinToString(" AND ").ifEmpty { null }
+        val selectionArgs = timeFilter.second
 
         val sortOrder = "${MediaStore.Images.Media.DATE_ADDED} ASC"
 

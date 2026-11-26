@@ -42,6 +42,7 @@ object GraphemeUtil {
      * appending [ellipsis] if truncated.
      */
     fun truncate(text: String, maxGraphemes: Int, ellipsis: String = "…"): String {
+        if (maxGraphemes <= 0) return ""
         val clusters = toGraphemeClusters(text)
         return if (clusters.size <= maxGraphemes) {
             text

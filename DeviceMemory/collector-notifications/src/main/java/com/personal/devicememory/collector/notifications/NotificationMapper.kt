@@ -2,6 +2,7 @@ package com.personal.devicememory.collector.notifications
 
 import android.app.Notification
 import android.service.notification.StatusBarNotification
+import com.personal.devicememory.core.common.filter.SensitiveContentFilter
 import com.personal.devicememory.core.common.model.CollectedRecord
 import com.personal.devicememory.core.common.model.SourceType
 import com.personal.devicememory.core.common.util.toJsonString
@@ -65,19 +66,21 @@ object NotificationMapper {
      * Converts a [ParsedNotification] to a [CollectedRecord].
      */
     fun mapToRecord(parsed: ParsedNotification): CollectedRecord {
+        val redactedTitle = SensitiveContentFilter.redact(parsed.title)
+        val redactedText = SensitiveContentFilter.redact(parsed.text)
         val combinedText = buildString {
-            if (!parsed.title.isNullOrBlank()) {
-                append(parsed.title)
+            if (!redactedTitle.isNullOrBlank()) {
+                append(redactedTitle)
             }
-            if (!parsed.text.isNullOrBlank()) {
+            if (!redactedText.isNullOrBlank()) {
                 if (isNotEmpty()) append(": ")
-                append(parsed.text)
+                append(redactedText)
             }
         }
 
         val metadata = mapOf<String, Any?>(
             "package" to parsed.packageName,
-            "title" to parsed.title,
+            "title" to redactedTitle,
             "channel_id" to parsed.channelId,
             "category" to parsed.category,
             "is_ongoing" to parsed.isOngoing,

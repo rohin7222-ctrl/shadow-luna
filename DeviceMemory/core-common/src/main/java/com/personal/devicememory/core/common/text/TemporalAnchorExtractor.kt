@@ -91,16 +91,26 @@ object TemporalAnchorExtractor {
 
         val results = mutableListOf<TemporalAnchor>()
         val zone = ZoneId.systemDefault()
-        var targetDate = Instant.ofEpochMilli(referenceEpochMillis).atZone(zone).toLocalDate()
+        val refDate = Instant.ofEpochMilli(referenceEpochMillis).atZone(zone).toLocalDate()
+        var primaryAnchorDate: LocalDate? = null
+        val matchedSpans = mutableListOf<IntRange>()
 
-        // 1. Check relative day markers (English + Tamil)
-        val combinedDays = ENGLISH_DAYS + TAMIL_DAYS
+        fun overlapsMatched(start: Int, end: Int): Boolean =
+            matchedSpans.any { start < it.last + 1 && end > it.first }
+
+        // 1. Check relative day markers sorted longest-first so "day after tomorrow" beats "tomorrow"
+        val combinedDays = (ENGLISH_DAYS + TAMIL_DAYS).entries.sortedByDescending { it.key.length }
         for ((word, dayOffset) in combinedDays) {
             val pattern = Pattern.compile("(?i)(?<=^|\\s)${Pattern.quote(word)}(?=\\s|\$|[.,!?;])")
             val matcher = pattern.matcher(text)
-            if (matcher.find()) {
-                val resolvedDate = targetDate.plusDays(dayOffset.toLong())
-                targetDate = resolvedDate
+            while (matcher.find()) {
+                val start = matcher.start()
+                val end = matcher.end()
+                if (overlapsMatched(start, end)) continue
+                matchedSpans.add(start until end)
+
+                val resolvedDate = refDate.plusDays(dayOffset.toLong())
+                if (primaryAnchorDate == null) primaryAnchorDate = resolvedDate
                 val targetMillis = resolvedDate.atStartOfDay(zone).toInstant().toEpochMilli()
                 results.add(
                     TemporalAnchor(
@@ -113,12 +123,15 @@ object TemporalAnchorExtractor {
             }
         }
 
+        val effectiveDate = primaryAnchorDate ?: refDate
+
         // 2. Check time of day qualifiers ("காலை", "evening", etc.)
-        for ((word, hour) in TIME_OF_DAY_HOUR) {
+        val sortedTod = TIME_OF_DAY_HOUR.entries.sortedByDescending { it.key.length }
+        for ((word, hour) in sortedTod) {
             val pattern = Pattern.compile("(?i)(?<=^|\\s)${Pattern.quote(word)}(?=\\s|\$|[.,!?;])")
             val matcher = pattern.matcher(text)
             if (matcher.find()) {
-                val targetDateTime = targetDate.atTime(hour, 0).atZone(zone)
+                val targetDateTime = effectiveDate.atTime(hour, 0).atZone(zone)
                 results.add(
                     TemporalAnchor(
                         matchedPhrase = matcher.group(),
@@ -130,30 +143,39 @@ object TemporalAnchorExtractor {
             }
         }
 
-        // 3. Explicit clock times ("5 pm", "10:30 am", "18:00")
-        val clockMatch = CLOCK_TIME_REGEX.find(text)
-        if (clockMatch != null) {
-            val hourRaw12 = clockMatch.groupValues[1].toIntOrNull()
-            val min12 = clockMatch.groupValues[2].toIntOrNull() ?: 0
+        // 3. Explicit clock times ("5 pm", "10:30 am", "18:00") with strict minute validation
+        for (clockMatch in CLOCK_TIME_REGEX.findAll(text)) {
+            val rawHour12Str = clockMatch.groupValues[1]
+            val rawMin12Str = clockMatch.groupValues[2]
             val amPm = clockMatch.groupValues[3].lowercase()
-            val hour24Explicit = clockMatch.groupValues[4].toIntOrNull()
-            val min24 = clockMatch.groupValues[5].toIntOrNull() ?: 0
+            val rawHour24Str = clockMatch.groupValues[4]
+            val rawMin24Str = clockMatch.groupValues[5]
 
             val (hour24, minute) = when {
-                hourRaw12 != null && hourRaw12 in 1..12 && amPm.isNotEmpty() -> {
-                    val converted = when {
-                        amPm == "pm" && hourRaw12 < 12 -> hourRaw12 + 12
-                        amPm == "am" && hourRaw12 == 12 -> 0
-                        else -> hourRaw12
+                rawHour12Str.isNotEmpty() && amPm.isNotEmpty() -> {
+                    val h12 = rawHour12Str.toIntOrNull() ?: -1
+                    val m12 = if (rawMin12Str.isEmpty()) 0 else (rawMin12Str.toIntOrNull() ?: -1)
+                    if (h12 in 1..12 && m12 in 0..59) {
+                        val converted = when {
+                            amPm == "pm" && h12 < 12 -> h12 + 12
+                            amPm == "am" && h12 == 12 -> 0
+                            else -> h12
+                        }
+                        converted to m12
+                    } else {
+                        -1 to -1
                     }
-                    converted to min12.coerceIn(0, 59)
                 }
-                hour24Explicit != null -> hour24Explicit.coerceIn(0, 23) to min24.coerceIn(0, 59)
+                rawHour24Str.isNotEmpty() -> {
+                    val h24 = rawHour24Str.toIntOrNull() ?: -1
+                    val m24 = rawMin24Str.toIntOrNull() ?: -1
+                    if (h24 in 0..23 && m24 in 0..59) h24 to m24 else -1 to -1
+                }
                 else -> -1 to -1
             }
 
-            if (hour24 in 0..23) {
-                val clockDt = targetDate.atTime(hour24, minute).atZone(zone)
+            if (hour24 in 0..23 && minute in 0..59) {
+                val clockDt = effectiveDate.atTime(hour24, minute).atZone(zone)
                 results.add(
                     TemporalAnchor(
                         matchedPhrase = clockMatch.value.trim(),
@@ -181,27 +203,27 @@ object TemporalAnchorExtractor {
         val zone = ZoneId.systemDefault()
         val refDate = Instant.ofEpochMilli(referenceEpochMillis).atZone(zone).toLocalDate()
 
+        val isLastWeek = qLower.contains("last week") || qLower.contains("இந்த வாரம்")
         var dayOffset: Int? = null
         var matchedDayLabel: String? = null
-        if (qLower.contains("last week") || qLower.contains("பழைய") || qLower.contains("இந்த வாரம்")) {
-            val start = refDate.minusDays(7).atStartOfDay(zone).toInstant().toEpochMilli()
-            val end = referenceEpochMillis
-            return TemporalWindow(start, end, "Last 7 days")
-        }
 
-        val dayChecks = ENGLISH_DAYS + TAMIL_DAYS
-        for ((word, off) in dayChecks) {
-            val pat = Pattern.compile("(?i)(?<=^|\\s)${Pattern.quote(word)}(?=\\s|\$|[.,!?;])")
-            if (pat.matcher(qLower).find()) {
-                dayOffset = off
-                matchedDayLabel = word
-                break
+        if (!isLastWeek) {
+            val dayChecks = (ENGLISH_DAYS + TAMIL_DAYS).entries.sortedByDescending { it.key.length }
+            for ((word, off) in dayChecks) {
+                val pat = Pattern.compile("(?i)(?<=^|\\s)${Pattern.quote(word)}(?=\\s|\$|[.,!?;])")
+                if (pat.matcher(qLower).find()) {
+                    dayOffset = off
+                    matchedDayLabel = word
+                    break
+                }
             }
+        } else {
+            matchedDayLabel = "Last 7 days"
         }
 
         var hourRange: Pair<Int, Int>? = null
         var matchedTodLabel: String? = null
-        for ((word, range) in TIME_OF_DAY_WINDOW) {
+        for ((word, range) in TIME_OF_DAY_WINDOW.entries.sortedByDescending { it.key.length }) {
             val pat = Pattern.compile("(?i)(?<=^|\\s)${Pattern.quote(word)}(?=\\s|\$|[.,!?;])")
             if (pat.matcher(qLower).find()) {
                 hourRange = range
@@ -210,18 +232,25 @@ object TemporalAnchorExtractor {
             }
         }
 
-        if (dayOffset == null && hourRange == null) return null
+        if (!isLastWeek && dayOffset == null && hourRange == null) return null
 
         val startMs: Long
         val endMs: Long
-        if (dayOffset != null) {
-            val d = refDate.plusDays(dayOffset.toLong())
-            startMs = d.atStartOfDay(zone).toInstant().toEpochMilli()
-            endMs = d.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli() - 1L
-        } else {
-            // Time-of-day only -> scan recent 14 days within matching hours
-            startMs = refDate.minusDays(14).atStartOfDay(zone).toInstant().toEpochMilli()
-            endMs = referenceEpochMillis
+        when {
+            isLastWeek -> {
+                startMs = refDate.minusDays(7).atStartOfDay(zone).toInstant().toEpochMilli()
+                endMs = referenceEpochMillis
+            }
+            dayOffset != null -> {
+                val d = refDate.plusDays(dayOffset.toLong())
+                startMs = d.atStartOfDay(zone).toInstant().toEpochMilli()
+                endMs = d.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli() - 1L
+            }
+            else -> {
+                // Time-of-day only -> scan recent 14 days within matching hours
+                startMs = refDate.minusDays(14).atStartOfDay(zone).toInstant().toEpochMilli()
+                endMs = referenceEpochMillis
+            }
         }
 
         val label = listOfNotNull(matchedDayLabel, matchedTodLabel).joinToString(" • ")

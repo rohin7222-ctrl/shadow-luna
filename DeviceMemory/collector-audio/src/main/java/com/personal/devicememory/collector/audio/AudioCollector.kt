@@ -58,12 +58,17 @@ class AudioCollector(
             MediaStore.Audio.Media.DATE_ADDED
         )
 
-        val (selection, selectionArgs) = if (sinceTimestamp > 0) {
+        val pendingFilter = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            "${MediaStore.MediaColumns.IS_PENDING} = 0"
+        } else null
+        val timeFilter = if (sinceTimestamp > 0) {
             val sinceSeconds = sinceTimestamp / 1000
-            "${MediaStore.Audio.Media.DATE_ADDED} > ?" to arrayOf(sinceSeconds.toString())
+            "${MediaStore.Audio.Media.DATE_ADDED} >= ?" to arrayOf(sinceSeconds.toString())
         } else {
             null to null
         }
+        val selection = listOfNotNull(pendingFilter, timeFilter.first).joinToString(" AND ").ifEmpty { null }
+        val selectionArgs = timeFilter.second
 
         val sortOrder = "${MediaStore.Audio.Media.DATE_ADDED} ASC"
 

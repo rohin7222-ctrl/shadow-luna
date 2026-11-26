@@ -102,6 +102,19 @@ class VideoJepaAnalyzerTest {
         assertTrue(text.contains("Speech-Dominant VAD 68%"))
         assertTrue(text.contains("vis_098"))
         assertTrue(text.contains("ac_019"))
-        assertTrue(rec.metadataJson?.contains("av_analysis") == true)
+        assertTrue(rec.metadataJson?.contains("\"av_analysis\":{") == true)
+    }
+
+    @Test
+    fun `handles NaN patch values and non-finite fps safely without rounding crash`() {
+        val badFrames = listOf(
+            FrameSample(0L, FloatArray(16) { Float.NaN }, Double.NaN, 0.2, 0.2),
+            FrameSample(500L, FloatArray(16) { 0.4f }, 0.4, 0.4, 0.4)
+        )
+        val res = VideoJepaAnalyzer.analyzeFrames(badFrames, codec = "AVC", estimatedFps = Double.NaN)
+        assertNotNull(res)
+        assertTrue(res!!.motionScore.isFinite())
+        assertTrue(res.vJepaNovelty.isFinite())
+        assertEquals(null, res.estimatedFps)
     }
 }

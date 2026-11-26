@@ -50,9 +50,11 @@ object SpectralAudioEngine {
     private fun melToHz(mel: Double): Double = 700.0 * (10.0.pow(mel / 2595.0) - 1.0)
     private fun Double.pow(p: Double): Double = kotlin.math.exp(p * ln(this))
 
-    /** In-place iterative Radix-2 Cooley-Tukey FFT for real+imag arrays of length power-of-2. */
+    /** In-place iterative Radix-2 Cooley-Tukey FFT for real+imag arrays of matching power-of-2 length. */
     fun fftInPlace(real: DoubleArray, imag: DoubleArray) {
         val n = real.size
+        require(n == imag.size) { "real (${real.size}) and imag (${imag.size}) arrays must match" }
+        require(n > 0 && (n and (n - 1)) == 0) { "FFT length ($n) must be a positive power of 2" }
         var j = 0
         for (i in 1 until n) {
             var bit = n shr 1
@@ -121,6 +123,7 @@ object SpectralAudioEngine {
     }
 
     fun analyzePcm(samples: FloatArray, sampleRate: Int = TARGET_SAMPLE_RATE): AudioAnalysisResult {
+        val safeRate = sampleRate.coerceAtLeast(1000)
         if (samples.size < FFT_SIZE) {
             return AudioAnalysisResult(
                 acousticScene = "Quiet / Silence",
@@ -135,15 +138,16 @@ object SpectralAudioEngine {
             )
         }
 
-        val melFilters = buildMelFilterbank(sampleRate)
+        val melFilters = buildMelFilterbank(safeRate)
         val specBins = FFT_SIZE / 2 + 1
-        val freqPerBin = sampleRate.toDouble() / FFT_SIZE
+        val freqPerBin = safeRate.toDouble() / FFT_SIZE
 
         val mfccAccum = DoubleArray(MFCC_COUNT)
         val mel16Accum = DoubleArray(16)
         var centroidSum = 0.0
         var flatnessSum = 0.0
         var fluxSum = 0.0
+        var fluxFrameCount = 0
         var rmsSum = 0.0
         var zcrSum = 0.0
         var voiceActiveFrames = 0
@@ -157,12 +161,15 @@ object SpectralAudioEngine {
         while (start + FFT_SIZE <= samples.size) {
             var frameSq = 0.0
             var zc = 0
+            var prevSample = 0.0
             for (i in 0 until FFT_SIZE) {
-                val x = samples[start + i].toDouble()
+                val raw = samples[start + i].toDouble()
+                val x = if (raw.isFinite()) raw.coerceIn(-1.0, 1.0) else 0.0
                 frameSq += x * x
-                if (i > 0 && ((samples[start + i - 1] >= 0f) != (samples[start + i] >= 0f))) {
+                if (i > 0 && ((prevSample >= 0.0) != (x >= 0.0))) {
                     zc++
                 }
+                prevSample = x
                 real[i] = x * HANN_WINDOW[i]
                 imag[i] = 0.0
             }
@@ -192,8 +199,10 @@ object SpectralAudioEngine {
                 totalBandEnergy += pwr
                 if (hz in 300.0..3400.0) voiceBandEnergy += pwr
 
-                val diff = m - prevMag[k]
-                if (diff > 0.0) frameFlux += diff
+                if (frameCount > 0) {
+                    val diff = m - prevMag[k]
+                    if (diff > 0.0) frameFlux += diff
+                }
             }
             prevMag = mag
 
@@ -201,11 +210,13 @@ object SpectralAudioEngine {
             val arithMean = magSum / specBins
             val geomMean = exp(logMagSum / specBins)
             val flatness = (geomMean / max(arithMean, 1e-12)).coerceIn(0.0, 1.0)
-            val normalizedFlux = (frameFlux / max(magSum, 1e-6)).coerceIn(0.0, 4.0)
 
             centroidSum += centroid
             flatnessSum += flatness
-            fluxSum += normalizedFlux
+            if (frameCount > 0) {
+                fluxSum += (frameFlux / max(magSum, 1e-6)).coerceIn(0.0, 4.0)
+                fluxFrameCount++
+            }
 
             // 2026 VAD Heuristic: energy above noise floor + concentrated in 300-3400Hz speech band + moderate flatness & ZCR
             val voiceBandShare = voiceBandEnergy / totalBandEnergy
@@ -245,7 +256,7 @@ object SpectralAudioEngine {
         val rmsDb = (20.0 * log10(max(avgRms, 1e-5))).toInt().coerceIn(-70, 0)
         val avgCentroid = (centroidSum / denom).toInt()
         val avgFlatness = (flatnessSum / denom).coerceIn(0.0, 1.0)
-        val avgFlux = fluxSum / denom
+        val avgFlux = if (fluxFrameCount > 0) fluxSum / fluxFrameCount else 0.0
         val speechRatio = (voiceActiveFrames.toDouble() / denom).coerceIn(0.0, 1.0)
         val avgZcr = zcrSum / denom
 

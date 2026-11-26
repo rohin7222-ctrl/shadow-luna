@@ -23,31 +23,46 @@ object DatabaseKeyManager {
     private const val PREFS_NAME = "devicememory_crypto"
     private const val PREF_ENCRYPTED_PASSPHRASE = "encrypted_passphrase"
     private const val PREF_IV = "passphrase_iv"
+    private const val PREF_FALLBACK_PASSPHRASE = "fallback_passphrase"
+    private const val DB_NAME = "devicememory.db"
     private const val ANDROID_KEYSTORE = "AndroidKeyStore"
     private const val GCM_TAG_LENGTH = 128
 
+    @Synchronized
     fun getPassphrase(context: Context): ByteArray {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
         val encryptedB64 = prefs.getString(PREF_ENCRYPTED_PASSPHRASE, null)
         val ivB64 = prefs.getString(PREF_IV, null)
+        val persistedFallback = prefs.getString(PREF_FALLBACK_PASSPHRASE, null)
 
-        return if (encryptedB64 != null && ivB64 != null) {
+        if (encryptedB64 != null && ivB64 != null) {
             try {
                 val encryptedBytes = Base64.decode(encryptedB64, Base64.NO_WRAP)
                 val iv = Base64.decode(ivB64, Base64.NO_WRAP)
-                decryptPassphrase(encryptedBytes, iv)
+                return decryptPassphrase(encryptedBytes, iv)
             } catch (e: Throwable) {
-                Log.e(TAG, "Decryption failed (corrupted or rotated key). Regenerating passphrase safely.", e)
+                Log.e(TAG, "Decryption failed (corrupted or rotated key). Resetting unreadable DB and key.", e)
+                // Wipe unreadable DB before rotating passphrase so SQLCipher never throws SQLITE_NOTADB
+                try { context.deleteDatabase(DB_NAME) } catch (_: Throwable) {}
+                prefs.edit().clear().commit()
+                return generateAndStorePassphrase(prefs)
+            }
+        } else if (persistedFallback != null) {
+            return try {
+                Base64.decode(persistedFallback, Base64.NO_WRAP)
+            } catch (_: Throwable) {
+                try { context.deleteDatabase(DB_NAME) } catch (_: Throwable) {}
+                prefs.edit().clear().commit()
                 generateAndStorePassphrase(prefs)
             }
-        } else {
-            generateAndStorePassphrase(prefs)
         }
+
+        return generateAndStorePassphrase(prefs)
     }
 
-    private fun getOrCreateKeystoreKey(): SecretKey {
-        try {
+    private fun getOrCreateKeystoreKey(): SecretKey? {
+        return try {
             val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
 
             if (keyStore.containsAlias(KEYSTORE_ALIAS)) {
@@ -75,12 +90,10 @@ object DatabaseKeyManager {
                 .build()
 
             keyGenerator.init(spec)
-            return keyGenerator.generateKey()
+            keyGenerator.generateKey()
         } catch (e: Throwable) {
-            Log.w(TAG, "AndroidKeyStore failed, falling back to internal key generator", e)
-            val fallbackKeyGen = KeyGenerator.getInstance("AES")
-            fallbackKeyGen.init(256)
-            return fallbackKeyGen.generateKey()
+            Log.w(TAG, "AndroidKeyStore unavailable on this device, using persistent private storage", e)
+            null
         }
     }
 
@@ -90,30 +103,42 @@ object DatabaseKeyManager {
 
         try {
             val key = getOrCreateKeystoreKey()
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            cipher.init(Cipher.ENCRYPT_MODE, key)
+            if (key != null) {
+                val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+                cipher.init(Cipher.ENCRYPT_MODE, key)
 
-            val encrypted = cipher.doFinal(passphrase)
-            val iv = cipher.iv
+                val encrypted = cipher.doFinal(passphrase)
+                val iv = cipher.iv
 
-            prefs.edit()
-                .putString(PREF_ENCRYPTED_PASSPHRASE, Base64.encodeToString(encrypted, Base64.NO_WRAP))
-                .putString(PREF_IV, Base64.encodeToString(iv, Base64.NO_WRAP))
-                .apply()
+                prefs.edit()
+                    .remove(PREF_FALLBACK_PASSPHRASE)
+                    .putString(PREF_ENCRYPTED_PASSPHRASE, Base64.encodeToString(encrypted, Base64.NO_WRAP))
+                    .putString(PREF_IV, Base64.encodeToString(iv, Base64.NO_WRAP))
+                    .commit()
+                return passphrase
+            }
         } catch (e: Throwable) {
-            Log.e(TAG, "Error generating encrypted passphrase", e)
+            Log.e(TAG, "Error encrypting passphrase with KeyStore, persisting fallback passphrase", e)
         }
+
+        prefs.edit()
+            .remove(PREF_ENCRYPTED_PASSPHRASE)
+            .remove(PREF_IV)
+            .putString(PREF_FALLBACK_PASSPHRASE, Base64.encodeToString(passphrase, Base64.NO_WRAP))
+            .commit()
 
         return passphrase
     }
 
     private fun decryptPassphrase(encryptedBytes: ByteArray, iv: ByteArray): ByteArray {
         val key = getOrCreateKeystoreKey()
+            ?: throw IllegalStateException("AndroidKeyStore key unavailable for decryption")
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(GCM_TAG_LENGTH, iv))
         return cipher.doFinal(encryptedBytes)
     }
 
+    @Synchronized
     fun destroyKey(context: Context) {
         try {
             val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
@@ -127,6 +152,6 @@ object DatabaseKeyManager {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .clear()
-            .apply()
+            .commit()
     }
 }

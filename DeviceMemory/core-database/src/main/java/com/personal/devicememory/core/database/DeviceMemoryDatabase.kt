@@ -266,10 +266,12 @@ abstract class DeviceMemoryDatabase : RoomDatabase() {
          * Destroys the database and its encryption key.
          */
         fun destroyAll(context: Context) {
-            INSTANCE?.close()
-            INSTANCE = null
-            context.deleteDatabase(DB_NAME)
-            DatabaseKeyManager.destroyKey(context)
+            synchronized(this) {
+                INSTANCE?.close()
+                INSTANCE = null
+                context.deleteDatabase(DB_NAME)
+                DatabaseKeyManager.destroyKey(context)
+            }
         }
     }
 }

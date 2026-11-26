@@ -1,7 +1,9 @@
 import base64
 import ctypes
+import hashlib
 import json
 import os
+import shutil
 import socket
 import sqlite3
 import subprocess
@@ -57,31 +59,37 @@ def get_all_local_ips() -> list[str]:
     return ips or ["127.0.0.1"]
 
 
-_fw_cache = {"checked_at": 0.0, "data": {"rule_exists": False, "wifi_profile": "Unknown", "blocked_likely": False}}
+_fw_lock = threading.Lock()
+_fw_cache = {"checked_at": 0.0, "refreshing": False, "data": {"rule_exists": False, "wifi_profile": "Unknown", "blocked_likely": False}}
 
 
-def check_firewall_status(force: bool = False) -> dict:
-    now = time.time()
-    if not force and now - _fw_cache["checked_at"] < 4.0:
-        return _fw_cache["data"]
+def _probe_firewall_now() -> dict:
     no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
     rule_ok = False
     profile = "Unknown"
     try:
         r = subprocess.run(
-            ["netsh", "advfirewall", "firewall", "show", "rule", "name=Shadow Luna Server 8000"],
-            capture_output=True, text=True, timeout=2.5, creationflags=no_window
+            ["powershell", "-NoProfile", "-Command",
+             "if (Get-NetFirewallRule -DisplayName 'Shadow Luna Server 8000' -ErrorAction SilentlyContinue | Where-Object { $_.Enabled -eq 'True' }) { 'OK' }"],
+            capture_output=True, text=True, timeout=4.0, creationflags=no_window
         )
-        out = r.stdout or ""
-        if "Enabled:" in out and "Yes" in out and ("Any" in out or "Public" in out or "Private" in out):
+        if "OK" in (r.stdout or ""):
             rule_ok = True
+        else:
+            r2 = subprocess.run(
+                ["netsh", "advfirewall", "firewall", "show", "rule", "name=Shadow Luna Server 8000"],
+                capture_output=True, text=True, timeout=2.5, creationflags=no_window
+            )
+            out = r2.stdout or ""
+            if "8000" in out and ("Yes" in out or "True" in out or "Enabled" in out):
+                rule_ok = True
     except Exception:
         pass
     try:
         p = subprocess.run(
             ["powershell", "-NoProfile", "-Command",
              "(Get-NetConnectionProfile -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty NetworkCategory)"],
-            capture_output=True, text=True, timeout=2.5, creationflags=no_window
+            capture_output=True, text=True, timeout=3.0, creationflags=no_window
         )
         cat = (p.stdout or "").strip()
         if cat:
@@ -93,9 +101,25 @@ def check_firewall_status(force: bool = False) -> dict:
         "wifi_profile": profile,
         "blocked_likely": (not rule_ok),
     }
-    _fw_cache["checked_at"] = now
-    _fw_cache["data"] = res
+    with _fw_lock:
+        _fw_cache["checked_at"] = time.time()
+        _fw_cache["data"] = res
+        _fw_cache["refreshing"] = False
     return res
+
+
+def check_firewall_status(force: bool = False) -> dict:
+    if force:
+        return _probe_firewall_now()
+    now = time.time()
+    with _fw_lock:
+        stale = (now - _fw_cache["checked_at"]) >= 8.0
+        already = _fw_cache["refreshing"]
+        cached = dict(_fw_cache["data"])
+        if stale and not already:
+            _fw_cache["refreshing"] = True
+            threading.Thread(target=_probe_firewall_now, daemon=True).start()
+    return cached
 
 
 def is_port_open(host: str, port: int, timeout: float = 0.35) -> bool:
@@ -122,10 +146,12 @@ class LunaServerController:
 
     def __init__(self):
         self.proc = None
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
         self.log_buffer = deque(maxlen=400)
         self.wifi_ip = get_wifi_ip()
         self.window = None
+        self._closing = False
+        self._last_good_snap = None
 
     def append_log(self, line: str):
         ts = datetime.now().strftime("%H:%M:%S")
@@ -144,6 +170,8 @@ class LunaServerController:
 
     def start_server(self) -> tuple[bool, str]:
         with self.lock:
+            if self._closing:
+                return False, "Studio shutting down"
             if self.proc is not None and self.proc.poll() is None:
                 return True, "Server already running"
 
@@ -205,58 +233,71 @@ class LunaServerController:
             pid = self.proc.pid if (self.proc is not None and self.proc.poll() is None) else None
             self.proc = None
 
-        no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
-        killed = False
-        if pid is not None:
-            try:
-                subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True, creationflags=no_window)
-                killed = True
-            except Exception:
-                pass
+            no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+            killed = False
+            if pid is not None:
+                try:
+                    subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True, creationflags=no_window)
+                    killed = True
+                except Exception:
+                    pass
 
-        if is_port_open("127.0.0.1", SERVER_PORT, timeout=0.25):
-            try:
-                ns = subprocess.run(
-                    ["netstat", "-ano", "-p", "TCP"],
-                    capture_output=True,
-                    text=True,
-                    creationflags=no_window,
-                )
-                pids = set()
-                for line in ns.stdout.splitlines():
-                    parts = line.split()
-                    if len(parts) >= 5 and f":{SERVER_PORT}" in parts[1] and parts[3].upper() == "LISTENING":
-                        if parts[4].isdigit() and int(parts[4]) > 0:
-                            pids.add(parts[4])
-                for ext_pid in pids:
-                    subprocess.run(["taskkill", "/F", "/T", "/PID", ext_pid], capture_output=True, creationflags=no_window)
-
-                if is_port_open("127.0.0.1", SERVER_PORT, timeout=0.25) and pids:
-                    pid_filter = " -or ".join([f"$_.ParentProcessId -eq {p} -or $_.ProcessId -eq {p}" for p in pids])
-                    ps_cmd = (
-                        f"Get-CimInstance Win32_Process -Filter \"Name LIKE 'python%'\" | "
-                        f"Where-Object {{ {pid_filter} -or $_.CommandLine -like '*luna_server*' }} | "
-                        f"ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}"
+            if is_port_open("127.0.0.1", SERVER_PORT, timeout=0.25):
+                try:
+                    ns = subprocess.run(
+                        ["netstat", "-ano", "-p", "TCP"],
+                        capture_output=True,
+                        text=True,
+                        creationflags=no_window,
                     )
-                    subprocess.run(["powershell", "-NoProfile", "-Command", ps_cmd], capture_output=True, creationflags=no_window)
-                killed = True
-            except Exception:
-                pass
+                    pids = set()
+                    for line in ns.stdout.splitlines():
+                        parts = line.split()
+                        if len(parts) >= 5 and f":{SERVER_PORT}" in parts[1] and parts[3].upper() == "LISTENING":
+                            if parts[4].isdigit() and int(parts[4]) > 0:
+                                pids.add(parts[4])
+                    for ext_pid in pids:
+                        subprocess.run(["taskkill", "/F", "/T", "/PID", ext_pid], capture_output=True, creationflags=no_window)
 
-        self.append_log("Server stopped." if killed else "Server is offline.")
-        self.write_runtime_state(False)
-        return True, "Server stopped"
+                    if is_port_open("127.0.0.1", SERVER_PORT, timeout=0.25) and pids:
+                        pid_filter = " -or ".join([f"$_.ParentProcessId -eq {p} -or $_.ProcessId -eq {p}" for p in pids])
+                        ps_cmd = (
+                            f"Get-CimInstance Win32_Process -Filter \"Name LIKE 'python%'\" | "
+                            f"Where-Object {{ {pid_filter} -or $_.CommandLine -like '*luna_server*' }} | "
+                            f"ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}"
+                        )
+                        subprocess.run(["powershell", "-NoProfile", "-Command", ps_cmd], capture_output=True, creationflags=no_window)
+                    killed = True
+                except Exception:
+                    pass
+
+            self.append_log("Server stopped." if killed else "Server is offline.")
+            self.write_runtime_state(False)
+            return True, "Server stopped"
 
     def restart_server(self) -> tuple[bool, str]:
-        self.stop_server()
-        time.sleep(0.45)
-        return self.start_server()
+        with self.lock:
+            if self._closing:
+                return False, "Studio shutting down"
+            self.stop_server()
+            time.sleep(0.45)
+            if self._closing:
+                return False, "Studio shutting down"
+            return self.start_server()
+
+    def wait_until_ready(self, timeout_sec: float = 4.5) -> bool:
+        deadline = time.time() + timeout_sec
+        while time.time() < deadline:
+            if is_port_open("127.0.0.1", SERVER_PORT, timeout=0.25):
+                return True
+            time.sleep(0.15)
+        return is_port_open("127.0.0.1", SERVER_PORT, timeout=0.25)
 
     def get_db_snapshot(self) -> dict:
         if not os.path.exists(DB_PATH):
             return {
                 "memories_count": 0, "nodes_count": 0, "tokens_count": 0, "db_size_kb": 0.0,
-                "latest_version": "2.2.0", "memories": [], "nodes": [], "tokens": [], "sessions": [], "updates": []
+                "latest_version": "2.2.0", "memories": [], "nodes": [], "tokens": [], "sessions": [], "transitions": [], "updates": []
             }
         try:
             with closing(sqlite3.connect(DB_PATH, timeout=15.0)) as conn:
@@ -265,7 +306,12 @@ class LunaServerController:
                 mem_count = c.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
                 node_count = c.execute("SELECT COUNT(*) FROM graph_nodes").fetchone()[0]
                 tok_count = c.execute("SELECT COUNT(*) FROM learned_tokens").fetchone()[0]
-                updates = [dict(r) for r in c.execute("SELECT * FROM app_updates ORDER BY released_at DESC LIMIT 20").fetchall()]
+                updates_raw = [dict(r) for r in c.execute("SELECT * FROM app_updates").fetchall()]
+                updates = sorted(
+                    updates_raw,
+                    key=lambda r: (tuple(int(x) if x.isdigit() else 0 for x in (r["version"] or "0").split(".")[:3]), r["released_at"]),
+                    reverse=True,
+                )[:20]
                 memories = [dict(r) for r in c.execute("SELECT * FROM memories ORDER BY timestamp DESC LIMIT 40").fetchall()]
                 nodes = [dict(r) for r in c.execute("SELECT * FROM graph_nodes ORDER BY mention_count DESC LIMIT 30").fetchall()]
                 tokens = []
@@ -285,7 +331,7 @@ class LunaServerController:
                     pass
             db_bytes = os.path.getsize(DB_PATH)
             latest_ver = updates[0]["version"] if updates else "2.2.0"
-            return {
+            snap = {
                 "memories_count": mem_count,
                 "nodes_count": node_count,
                 "tokens_count": tok_count,
@@ -298,10 +344,14 @@ class LunaServerController:
                 "transitions": transitions,
                 "updates": updates,
             }
+            self._last_good_snap = snap
+            return snap
         except Exception as e:
+            if self._last_good_snap:
+                return dict(self._last_good_snap, error=str(e))
             return {
                 "memories_count": 0, "nodes_count": 0, "tokens_count": 0, "db_size_kb": 0.0,
-                "latest_version": "?", "memories": [], "nodes": [], "tokens": [], "sessions": [], "updates": [], "error": str(e)
+                "latest_version": "?", "memories": [], "nodes": [], "tokens": [], "sessions": [], "transitions": [], "updates": [], "error": str(e)
             }
 
     def publish_update(self, title: str, changelog: str, estimated_seconds: int = 12) -> dict:
@@ -321,19 +371,45 @@ class LunaServerController:
             except Exception:
                 pass
 
+        srv_hash = "manual"
+        srv_file = os.path.join(BASE_DIR, "luna_server.py")
+        if os.path.exists(srv_file):
+            try:
+                with open(srv_file, "rb") as sf:
+                    srv_hash = hashlib.sha256(sf.read()).hexdigest()[:16]
+            except Exception:
+                pass
+
         with closing(sqlite3.connect(DB_PATH, timeout=15.0)) as conn:
             conn.row_factory = sqlite3.Row
             c = conn.cursor()
-            rows = c.execute("SELECT version FROM app_updates ORDER BY released_at DESC").fetchall()
-            latest = rows[0]["version"] if rows else "2.2.0"
+            c.execute(
+                "CREATE TABLE IF NOT EXISTS app_updates ("
+                "version TEXT PRIMARY KEY, title TEXT NOT NULL, changelog TEXT NOT NULL, "
+                "released_at INTEGER NOT NULL, estimated_seconds INTEGER DEFAULT 12, code_hash TEXT)"
+            )
+            rows = c.execute("SELECT version, released_at FROM app_updates").fetchall()
+            existing = {r["version"] for r in rows}
+            if rows:
+                rows_sorted = sorted(
+                    rows,
+                    key=lambda r: tuple(int(x) if x.isdigit() else 0 for x in (r["version"] or "0").split(".")[:3]),
+                    reverse=True,
+                )
+                latest = rows_sorted[0]["version"]
+            else:
+                latest = "2.2.0"
             parts = [int(x) if x.isdigit() else 0 for x in latest.split(".")]
             while len(parts) < 3:
                 parts.append(0)
             next_ver = f"{parts[0]}.{parts[1]}.{parts[2] + 1}"
+            while next_ver in existing:
+                parts[2] += 1
+                next_ver = f"{parts[0]}.{parts[1]}.{parts[2] + 1}"
             now_ms = int(time.time() * 1000)
             c.execute(
                 "INSERT INTO app_updates (version, title, changelog, released_at, estimated_seconds, code_hash) VALUES (?, ?, ?, ?, ?, ?)",
-                (next_ver, title, changelog, now_ms, max(5, estimated_seconds), f"manual-{now_ms}"),
+                (next_ver, title, changelog, now_ms, max(5, estimated_seconds), srv_hash),
             )
             conn.commit()
         return {"status": "PUBLISHED", "version": next_ver, "released_at": now_ms}
@@ -463,10 +539,14 @@ def start_control_http_server(ctrl: LunaServerController):
 
         def do_POST(self):
             path_only = self.path.split("?", 1)[0]
-            length = int(self.headers.get("Content-Length", "0") or 0)
-            raw_body = self.rfile.read(length).decode("utf-8") if length > 0 else "{}"
             try:
-                body = json.loads(raw_body) if raw_body.strip() else {}
+                length = max(0, min(int(self.headers.get("Content-Length", "0") or 0), 2_000_000))
+            except Exception:
+                length = 0
+            raw_body = self.rfile.read(length).decode("utf-8", errors="replace") if length > 0 else "{}"
+            try:
+                parsed = json.loads(raw_body) if raw_body.strip() else {}
+                body = parsed if isinstance(parsed, dict) else {}
             except Exception:
                 body = {}
 
@@ -482,7 +562,7 @@ def start_control_http_server(ctrl: LunaServerController):
             elif path_only == "/ctl/connect-app":
                 if not ctrl.is_running():
                     ctrl.start_server()
-                    time.sleep(1.2)
+                    ctrl.wait_until_ready(4.5)
                 try:
                     req = urllib.request.Request(
                         f"http://127.0.0.1:{SERVER_PORT}/api/handshake/laptop-ready",
@@ -493,7 +573,7 @@ def start_control_http_server(ctrl: LunaServerController):
                     with urllib.request.urlopen(req, timeout=3) as resp:
                         self._send_bytes(200, "application/json; charset=utf-8", resp.read())
                 except Exception as e:
-                    self._send_json(200, {"phase": "ERROR", "error": str(e)})
+                    self._send_json(503, {"phase": "ERROR", "error": str(e)})
             elif path_only == "/ctl/cancel-connect":
                 if ctrl.is_running():
                     try:
@@ -511,12 +591,12 @@ def start_control_http_server(ctrl: LunaServerController):
             elif path_only == "/ctl/chat":
                 if not ctrl.is_running():
                     ctrl.start_server()
-                    time.sleep(1.0)
+                    ctrl.wait_until_ready(4.5)
                 try:
                     req = urllib.request.Request(
                         f"http://127.0.0.1:{SERVER_PORT}/api/chat",
                         method="POST",
-                        data=json.dumps({"query": body.get("query", "")}).encode("utf-8"),
+                        data=json.dumps({"query": str(body.get("query", ""))}).encode("utf-8"),
                         headers={"Content-Type": "application/json"},
                     )
                     with urllib.request.urlopen(req, timeout=5) as resp:
@@ -524,30 +604,39 @@ def start_control_http_server(ctrl: LunaServerController):
                 except Exception as e:
                     self._send_json(500, {"error": str(e)})
             elif path_only == "/ctl/publish":
+                try:
+                    sec = int(body.get("estimated_seconds", 12))
+                except Exception:
+                    sec = 12
                 res = ctrl.publish_update(
-                    body.get("title", "Server Code Update"),
-                    body.get("changelog", "Updated from Studio"),
-                    int(body.get("estimated_seconds", 12)),
+                    str(body.get("title", "Server Code Update")),
+                    str(body.get("changelog", "Updated from Studio")),
+                    sec,
                 )
                 self._send_json(200, res)
             elif path_only == "/ctl/reset-brain":
                 ctrl.reset_brain()
                 self._send_json(200, {"ok": True})
             elif path_only == "/ctl/firewall":
-                py_exes = list(dict.fromkeys([PYTHON_EXE, sys.executable]))
+                py_exes = list(dict.fromkeys([
+                    PYTHON_EXE,
+                    sys.executable,
+                    getattr(sys, "_base_executable", ""),
+                ]))
                 exe_cmds = []
                 for idx, p_exe in enumerate(py_exes):
                     if p_exe and os.path.exists(p_exe):
+                        safe_path = p_exe.replace("'", "''")
                         rname = f"Shadow Luna Python {idx}"
                         exe_cmds.append(
-                            f'netsh advfirewall firewall delete rule name="{rname}" *> $null; '
-                            f'netsh advfirewall firewall add rule name="{rname}" dir=in action=allow program="{p_exe}" enable=yes profile=any'
+                            f"Remove-NetFirewallRule -DisplayName '{rname}' -ErrorAction SilentlyContinue; "
+                            f"New-NetFirewallRule -DisplayName '{rname}' -Direction Inbound -Action Allow -Program '{safe_path}' -Profile Any -Enabled True | Out-Null"
                         )
                 ps_script = "\n".join([
-                    'netsh advfirewall firewall delete rule name="Shadow Luna Server 8000" *> $null',
-                    'netsh advfirewall firewall add rule name="Shadow Luna Server 8000" dir=in action=allow protocol=TCP localport=8000 enable=yes profile=any',
-                    'netsh advfirewall firewall delete rule name="Shadow Luna Discovery 8800" *> $null',
-                    'netsh advfirewall firewall add rule name="Shadow Luna Discovery 8800" dir=in action=allow protocol=UDP localport=8800 enable=yes profile=any',
+                    "Remove-NetFirewallRule -DisplayName 'Shadow Luna Server 8000' -ErrorAction SilentlyContinue",
+                    "New-NetFirewallRule -DisplayName 'Shadow Luna Server 8000' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 8000 -Profile Any -Enabled True | Out-Null",
+                    "Remove-NetFirewallRule -DisplayName 'Shadow Luna Discovery 8800' -ErrorAction SilentlyContinue",
+                    "New-NetFirewallRule -DisplayName 'Shadow Luna Discovery 8800' -Direction Inbound -Action Allow -Protocol UDP -LocalPort 8800 -Profile Any -Enabled True | Out-Null",
                     *exe_cmds,
                 ])
                 encoded = base64.b64encode(ps_script.encode("utf-16-le")).decode("ascii")
@@ -556,7 +645,7 @@ def start_control_http_server(ctrl: LunaServerController):
                     no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
                     proc_fw = subprocess.run(
                         ["powershell", "-NoProfile", "-Command", uac_cmd],
-                        capture_output=True, text=True, timeout=30, creationflags=no_window
+                        capture_output=True, text=True, timeout=75, creationflags=no_window
                     )
                     fw = check_firewall_status(force=True)
                     if fw.get("rule_exists"):
@@ -568,16 +657,29 @@ def start_control_http_server(ctrl: LunaServerController):
                             "message": f"Admin prompt cancelled or blocked (code {proc_fw.returncode}). Click Allow & approve Yes."
                         })
                 except Exception as e:
-                    self._send_json(500, {"ok": False, "error": str(e)})
+                    self._send_json(500, {"ok": False, "error": str(e), "message": f"Firewall setup timed out or failed: {e}"})
             elif path_only == "/ctl/adb-bridge":
-                adb_exe = r"C:\Users\acer\AppData\Local\Android\Sdk\platform-tools\adb.exe"
-                if not os.path.exists(adb_exe):
-                    adb_exe = "adb"
+                candidates = [
+                    shutil.which("adb"),
+                    os.path.join(os.environ.get("ANDROID_HOME", ""), "platform-tools", "adb.exe"),
+                    os.path.join(os.environ.get("LOCALAPPDATA", ""), "Android", "Sdk", "platform-tools", "adb.exe"),
+                ]
+                adb_exe = next((p for p in candidates if p and os.path.exists(p)), "adb")
                 try:
                     no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+                    dev_proc = subprocess.run(
+                        [adb_exe, "devices"],
+                        capture_output=True, text=True, timeout=10, creationflags=no_window
+                    )
+                    serials = [
+                        line.split()[0]
+                        for line in (dev_proc.stdout or "").splitlines()[1:]
+                        if len(line.split()) >= 2 and line.split()[1] == "device"
+                    ]
+                    target_args = ["-s", serials[0]] if serials else []
                     r = subprocess.run(
-                        [adb_exe, "reverse", f"tcp:{SERVER_PORT}", f"tcp:{SERVER_PORT}"],
-                        capture_output=True, text=True, timeout=4, creationflags=no_window
+                        [adb_exe, *target_args, "reverse", f"tcp:{SERVER_PORT}", f"tcp:{SERVER_PORT}"],
+                        capture_output=True, text=True, timeout=10, creationflags=no_window
                     )
                     if r.returncode == 0:
                         self._send_json(200, {"ok": True, "message": "USB Cable Bridge Ready! On phone, tap Update URL -> http://127.0.0.1:8000"})
@@ -591,7 +693,10 @@ def start_control_http_server(ctrl: LunaServerController):
             else:
                 self._send_json(404, {"error": "Unknown endpoint"})
 
-    server = ThreadingHTTPServer(("127.0.0.1", CONTROL_PORT), ControlHandler)
+    class ExclusiveThreadingHTTPServer(ThreadingHTTPServer):
+        allow_reuse_address = False
+
+    server = ExclusiveThreadingHTTPServer(("127.0.0.1", CONTROL_PORT), ControlHandler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server
 
@@ -632,7 +737,11 @@ def main():
         return
 
     ctrl = LunaServerController()
-    http_ctl = start_control_http_server(ctrl)
+    try:
+        http_ctl = start_control_http_server(ctrl)
+    except OSError:
+        focus_existing_instance()
+        return
     ctrl.append_log("Shadow Desktop started cleanly. Background server initializing...")
 
     # Start fresh background server silently (replacing any stale port-8000 process)
@@ -652,7 +761,8 @@ def main():
         threading.Thread(target=apply_win32_window_branding, daemon=True).start()
 
     def on_closing():
-        if ctrl.is_running():
+        with ctrl.lock:
+            ctrl._closing = True
             ctrl.stop_server()
         try:
             ctrl.write_runtime_state(False)

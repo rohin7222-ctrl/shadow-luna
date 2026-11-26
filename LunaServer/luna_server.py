@@ -1,4 +1,5 @@
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -6,8 +7,9 @@ import socket
 import sqlite3
 import threading
 import time
+import unicodedata
 from contextlib import closing
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Optional
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -33,6 +35,32 @@ os.makedirs(STATIC_DIR, exist_ok=True)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "luna_memory.db")
+
+
+def _is_local_host(client_host: Optional[str]) -> bool:
+    if not client_host:
+        return False
+    h = client_host.strip().lower()
+    if h in ("127.0.0.1", "::1", "::ffff:127.0.0.1", "localhost"):
+        return True
+    try:
+        addr = ipaddress.ip_address(h)
+        return addr.is_loopback
+    except ValueError:
+        return False
+
+
+def _fmt_ts(ts_ms: int, fmt: str) -> str:
+    try:
+        sec = float(ts_ms) / 1000.0
+        # Guard bounds for Windows CPython localtime [1970..2999]
+        if sec < 0.0:
+            sec = 0.0
+        elif sec > 32503680000.0:
+            sec = 32503680000.0
+        return datetime.fromtimestamp(sec).strftime(fmt)
+    except Exception:
+        return "Recent"
 
 
 def open_db(row_factory=None) -> sqlite3.Connection:
@@ -154,6 +182,13 @@ def init_db():
             )
         ''')
         c.execute("CREATE INDEX IF NOT EXISTS idx_transitions_from ON learned_transitions(from_concept)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_memories_ts ON memories(timestamp DESC)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_memories_src_ts ON memories(source_type, timestamp DESC)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_nodes_mentions ON graph_nodes(mention_count DESC)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_edges_lookup ON graph_edges(source_id, target_id, relation)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_edges_ts ON graph_edges(timestamp DESC)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_tokens_freq_seen ON learned_tokens(frequency DESC, last_seen DESC)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_updates_rel ON app_updates(released_at DESC)")
         conn.commit()
 
 
@@ -169,12 +204,14 @@ handshake_state = {
     "received_tokens": 0,
     "last_message": "",
     "completed_at": 0,
+    "last_activity_at": 0,
 }
 
 
 def _refresh_handshake_locked(now_ms: int):
-    # Auto-expire waiting flags after 120s so stale sessions don't get stuck
-    if handshake_state["phase"] in ("WAITING_FOR_MOBILE", "WAITING_FOR_LAPTOP"):
+    # Auto-expire waiting or hung transferring sessions after 120s so UI never deadlocks
+    phase = handshake_state["phase"]
+    if phase in ("WAITING_FOR_MOBILE", "WAITING_FOR_LAPTOP"):
         if handshake_state["laptop_ready"] and now_ms - handshake_state["laptop_ready_at"] > 120_000:
             handshake_state["laptop_ready"] = False
         if handshake_state["mobile_ready"] and now_ms - handshake_state["mobile_ready_at"] > 120_000:
@@ -182,10 +219,25 @@ def _refresh_handshake_locked(now_ms: int):
         if not handshake_state["laptop_ready"] and not handshake_state["mobile_ready"]:
             handshake_state["phase"] = "IDLE"
             handshake_state["last_message"] = ""
-    elif handshake_state["phase"] == "COMPLETED":
+    elif phase == "TRANSFERRING":
+        last_act = max(
+            handshake_state.get("last_activity_at", 0),
+            handshake_state.get("laptop_ready_at", 0),
+            handshake_state.get("mobile_ready_at", 0),
+        )
+        if last_act > 0 and now_ms - last_act > 120_000:
+            handshake_state["laptop_ready"] = False
+            handshake_state["mobile_ready"] = False
+            handshake_state["phase"] = "IDLE"
+            handshake_state["last_message"] = "Transfer timed out — tap Connect to retry"
+    elif phase == "COMPLETED":
         if not handshake_state["laptop_ready"] and not handshake_state["mobile_ready"]:
             if handshake_state.get("completed_at", 0) > 0 and now_ms - handshake_state["completed_at"] > 15_000:
                 handshake_state["phase"] = "IDLE"
+
+
+def _sort_updates_semantic(rows):
+    return sorted(rows, key=lambda r: (parse_version_tuple(r["version"]), r["released_at"]), reverse=True)
 
 
 def register_server_release():
@@ -194,7 +246,7 @@ def register_server_release():
     with closing(open_db(sqlite3.Row)) as conn:
         c = conn.cursor()
 
-        rows = c.execute("SELECT * FROM app_updates ORDER BY released_at DESC").fetchall()
+        rows = _sort_updates_semantic(c.execute("SELECT * FROM app_updates").fetchall())
         if not rows:
             c.execute(
                 "INSERT INTO app_updates (version, title, changelog, released_at, estimated_seconds, code_hash) "
@@ -205,7 +257,6 @@ def register_server_release():
             latest = rows[0]
             if latest["code_hash"] != code_hash:
                 next_version = bump_patch_version(latest["version"])
-                # Ensure uniqueness if clock/version collides
                 existing_versions = {r["version"] for r in rows}
                 while next_version in existing_versions:
                     next_version = bump_patch_version(next_version)
@@ -241,8 +292,9 @@ class CognitiveEngine:
     def tokenize(text: str) -> List[str]:
         if not text:
             return []
-        # Extract English/Unicode Tamil tokens of length >= 2 containing alphanumeric characters
-        tokens = re.findall(r"[\w\u0B80-\u0BFF]+", text.lower(), flags=re.UNICODE)
+        norm = unicodedata.normalize("NFC", text.lower())
+        # Preserve Tamil vowel signs/combining marks cleanly alongside Latin tokens
+        tokens = re.findall(r"[\w\u0B80-\u0BFF]+", norm, flags=re.UNICODE)
         return [t for t in tokens if len(t) >= 2 and any(ch.isalnum() for ch in t)]
 
     @staticmethod
@@ -252,7 +304,8 @@ class CognitiveEngine:
         text = record.get("text_content") or ""
         ts = record.get("timestamp", int(time.time() * 1000))
         try:
-            meta = json.loads(record.get("metadata_json") or "{}")
+            parsed_meta = json.loads(record.get("metadata_json") or "{}")
+            meta = parsed_meta if isinstance(parsed_meta, dict) else {}
         except Exception:
             meta = {}
 
@@ -265,9 +318,10 @@ class CognitiveEngine:
             )
 
         # 2. Extract App node
-        pkg = meta.get("package") or meta.get("package_name")
+        pkg_raw = meta.get("package") or meta.get("package_name")
+        pkg = pkg_raw.strip() if isinstance(pkg_raw, str) and pkg_raw.strip() else None
         if pkg:
-            app_name = pkg.split(".")[-1].capitalize()
+            app_name = pkg.split(".")[-1].capitalize() or pkg
             c.execute(
                 "INSERT INTO graph_nodes (id, label, entity_type, last_seen) VALUES (?, ?, ?, ?) "
                 "ON CONFLICT(id) DO UPDATE SET mention_count = mention_count + 1, last_seen = ?",
@@ -275,7 +329,8 @@ class CognitiveEngine:
             )
 
         # 3. Extract Person node from Notifications / Contacts
-        title = meta.get("title") or meta.get("display_name")
+        title_raw = meta.get("title") or meta.get("display_name")
+        title = title_raw.strip() if isinstance(title_raw, str) and title_raw.strip() else None
         if title and source in ("NOTIFICATION", "CONTACT"):
             c.execute(
                 "INSERT INTO graph_nodes (id, label, entity_type, last_seen) VALUES (?, ?, ?, ?) "
@@ -299,20 +354,22 @@ class CognitiveEngine:
                     )
 
         # 4. Extract Media nodes (Photos / Screenshots / 2026 Video V-JEPA + Audio Spectral Fusion)
-        if source == "PHOTO":
-            is_screenshot = meta.get("is_screenshot", False)
+        clean_text = text.strip()
+        if source == "PHOTO" and clean_text:
+            is_screenshot = bool(meta.get("is_screenshot", False))
             node_type = "SCREENSHOT" if is_screenshot else "PHOTO"
             c.execute(
                 "INSERT INTO graph_nodes (id, label, entity_type, last_seen) VALUES (?, ?, ?, ?) "
                 "ON CONFLICT(id) DO UPDATE SET mention_count = mention_count + 1, last_seen = ?",
-                (f"media:{record['id']}", text[:80], node_type, ts, ts)
+                (f"media:{record['id']}", clean_text[:80], node_type, ts, ts)
             )
         elif source in ("VIDEO", "AUDIO"):
-            c.execute(
-                "INSERT INTO graph_nodes (id, label, entity_type, last_seen) VALUES (?, ?, ?, ?) "
-                "ON CONFLICT(id) DO UPDATE SET mention_count = mention_count + 1, last_seen = ?",
-                (f"media:{record['id']}", text[:90], source, ts, ts)
-            )
+            if clean_text:
+                c.execute(
+                    "INSERT INTO graph_nodes (id, label, entity_type, last_seen) VALUES (?, ?, ?, ?) "
+                    "ON CONFLICT(id) DO UPDATE SET mention_count = mention_count + 1, last_seen = ?",
+                    (f"media:{record['id']}", clean_text[:90], source, ts, ts)
+                )
             av = meta.get("av_analysis") if source == "VIDEO" else meta.get("audio_analysis")
             if isinstance(av, dict):
                 av_tags = [
@@ -326,13 +383,14 @@ class CognitiveEngine:
                     av.get("acoustic_code"),
                 ]
                 for tag in av_tags:
-                    if tag and isinstance(tag, str) and tag != "Neutral":
+                    if isinstance(tag, str):
                         clean_tag = tag.strip()
-                        c.execute(
-                            "INSERT INTO graph_nodes (id, label, entity_type, last_seen) VALUES (?, ?, ?, ?) "
-                            "ON CONFLICT(id) DO UPDATE SET mention_count = mention_count + 1, last_seen = ?",
-                            (f"av_scene:{clean_tag.lower()}", clean_tag, "AV_SCENE", ts, ts)
-                        )
+                        if clean_tag and clean_tag != "Neutral":
+                            c.execute(
+                                "INSERT INTO graph_nodes (id, label, entity_type, last_seen) VALUES (?, ?, ?, ?) "
+                                "ON CONFLICT(id) DO UPDATE SET mention_count = mention_count + 1, last_seen = ?",
+                                (f"av_scene:{clean_tag.lower()}", clean_tag, "AV_SCENE", ts, ts)
+                            )
 
         # 5. Update Latent User State
         c.execute(
@@ -356,10 +414,11 @@ class CognitiveEngine:
             if len(t) >= 3 and t not in stop:
                 return t
         try:
-            meta = json.loads(record.get("metadata_json") or "{}")
-            pkg = meta.get("package") or ""
-            if pkg:
-                return pkg.split(".")[-1].lower()
+            parsed_meta = json.loads(record.get("metadata_json") or "{}")
+            meta = parsed_meta if isinstance(parsed_meta, dict) else {}
+            pkg = meta.get("package")
+            if isinstance(pkg, str) and pkg.strip():
+                return pkg.strip().split(".")[-1].lower()
         except Exception:
             pass
         return toks[0] if toks else None
@@ -407,7 +466,7 @@ class CognitiveEngine:
         if a == b:
             return 1.0
         if len(a) < 3 or len(b) < 3:
-            return 0.7 if (a in b or b in a) else 0.0
+            return 0.7 if (max(len(a), len(b)) <= 3 and (a in b or b in a)) else 0.0
         ta = {a[i:i + 3] for i in range(len(a) - 2)}
         tb = {b[i:i + 3] for i in range(len(b) - 2)}
         inter = len(ta & tb)
@@ -460,7 +519,10 @@ DISCOVERY_PORT = 8800
 def _udp_discovery_loop():
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        else:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind(("0.0.0.0", DISCOVERY_PORT))
     except Exception:
         return
@@ -490,13 +552,16 @@ def api_ping():
 @app.post("/api/handshake/laptop-ready")
 def handshake_laptop_ready(request: Request):
     client_host = request.client.host if request.client else ""
-    if client_host not in ("127.0.0.1", "::1", "localhost"):
+    if not _is_local_host(client_host):
         return JSONResponse(status_code=403, content={"error": "Laptop handshake must originate locally"})
     now_ms = int(time.time() * 1000)
     with handshake_lock:
         _refresh_handshake_locked(now_ms)
         handshake_state["laptop_ready"] = True
         handshake_state["laptop_ready_at"] = now_ms
+        handshake_state["last_activity_at"] = now_ms
+        if handshake_state["phase"] == "TRANSFERRING":
+            return dict(handshake_state)
         if handshake_state["mobile_ready"]:
             handshake_state["phase"] = "TRANSFERRING"
             handshake_state["total_records"] = 0
@@ -519,6 +584,9 @@ def handshake_mobile_ready():
         _refresh_handshake_locked(now_ms)
         handshake_state["mobile_ready"] = True
         handshake_state["mobile_ready_at"] = now_ms
+        handshake_state["last_activity_at"] = now_ms
+        if handshake_state["phase"] == "TRANSFERRING":
+            return dict(handshake_state)
         if handshake_state["laptop_ready"]:
             handshake_state["phase"] = "TRANSFERRING"
             handshake_state["total_records"] = 0
@@ -544,8 +612,10 @@ def handshake_status():
 
 @app.post("/api/handshake/progress")
 def handshake_progress(req: HandshakeProgressRequest):
+    now_ms = int(time.time() * 1000)
     with handshake_lock:
         handshake_state["phase"] = "TRANSFERRING"
+        handshake_state["last_activity_at"] = now_ms
         handshake_state["total_records"] = req.total_records
         handshake_state["received_records"] = req.received_records
         handshake_state["received_tokens"] = req.received_tokens
@@ -559,15 +629,14 @@ def handshake_progress(req: HandshakeProgressRequest):
 def handshake_complete(req: HandshakeProgressRequest):
     now_ms = int(time.time() * 1000)
     summary = f"Synced {req.received_records} memories & {req.received_tokens} tokens from Mobile"
-    with closing(open_db()) as conn:
-        c = conn.cursor()
-        c.execute(
-            "INSERT INTO sync_sessions (synced_at, records_added, tokens_added, summary) VALUES (?, ?, ?, ?)",
-            (now_ms, req.received_records, req.received_tokens, summary)
-        )
-        conn.commit()
-
     with handshake_lock:
+        with closing(open_db()) as conn:
+            c = conn.cursor()
+            c.execute(
+                "INSERT INTO sync_sessions (synced_at, records_added, tokens_added, summary) VALUES (?, ?, ?, ?)",
+                (now_ms, req.received_records, req.received_tokens, summary)
+            )
+            conn.commit()
         handshake_state["laptop_ready"] = False
         handshake_state["mobile_ready"] = False
         handshake_state["phase"] = "COMPLETED"
@@ -575,6 +644,7 @@ def handshake_complete(req: HandshakeProgressRequest):
         handshake_state["received_records"] = req.received_records
         handshake_state["received_tokens"] = req.received_tokens
         handshake_state["completed_at"] = now_ms
+        handshake_state["last_activity_at"] = now_ms
         handshake_state["last_message"] = summary
         return dict(handshake_state)
 
@@ -663,20 +733,21 @@ def reset_brain():
 @app.get("/api/memories")
 def get_memories(request: Request, source: Optional[str] = None, limit: int = 50):
     client_host = request.client.host if request.client else ""
-    if client_host not in ("127.0.0.1", "::1", "localhost"):
+    if not _is_local_host(client_host):
         return JSONResponse(status_code=403, content={"error": "Memories dashboard restricted to local Windows Studio"})
+    safe_limit = max(1, min(limit, 500))
     with closing(open_db(sqlite3.Row)) as conn:
         c = conn.cursor()
         total_count = c.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
         if source:
             rows = c.execute(
                 "SELECT * FROM memories WHERE source_type = ? ORDER BY timestamp DESC LIMIT ?",
-                (source, limit)
+                (source, safe_limit)
             ).fetchall()
         else:
             rows = c.execute(
                 "SELECT * FROM memories ORDER BY timestamp DESC LIMIT ?",
-                (limit,)
+                (safe_limit,)
             ).fetchall()
         data = [dict(r) for r in rows]
     return {"count": total_count, "returned": len(data), "memories": data}
@@ -685,7 +756,7 @@ def get_memories(request: Request, source: Optional[str] = None, limit: int = 50
 @app.get("/api/graph")
 def get_knowledge_graph(request: Request):
     client_host = request.client.host if request.client else ""
-    if client_host not in ("127.0.0.1", "::1", "localhost"):
+    if not _is_local_host(client_host):
         return JSONResponse(status_code=403, content={"error": "Knowledge Graph restricted to local Windows Studio"})
     with closing(open_db(sqlite3.Row)) as conn:
         c = conn.cursor()
@@ -712,12 +783,12 @@ def get_user_state():
 @app.get("/api/updates")
 def get_updates(installed_version: Optional[str] = Query(default=None)):
     with closing(open_db(sqlite3.Row)) as conn:
-        rows = conn.execute("SELECT * FROM app_updates ORDER BY released_at DESC").fetchall()
+        rows = _sort_updates_semantic(conn.execute("SELECT * FROM app_updates").fetchall())
 
     updates_list = []
     for r in rows:
         item = dict(r)
-        item["released_at_display"] = datetime.fromtimestamp(item["released_at"] / 1000.0).strftime("%d %b %Y, %I:%M %p")
+        item["released_at_display"] = _fmt_ts(item["released_at"], "%d %b %Y, %I:%M %p")
         updates_list.append(item)
 
     latest = updates_list[0] if updates_list else None
@@ -747,10 +818,13 @@ def download_update_bundle(version: str):
 
 
 @app.post("/api/updates/publish")
-def publish_manual_update(req: PublishUpdateRequest):
+def publish_manual_update(request: Request, req: PublishUpdateRequest):
+    client_host = request.client.host if request.client else ""
+    if not _is_local_host(client_host):
+        return JSONResponse(status_code=403, content={"error": "Publishing updates restricted to local Windows Studio"})
     with closing(open_db(sqlite3.Row)) as conn:
         c = conn.cursor()
-        rows = c.execute("SELECT version FROM app_updates ORDER BY released_at DESC").fetchall()
+        rows = _sort_updates_semantic(c.execute("SELECT version, released_at FROM app_updates").fetchall())
         existing = {r["version"] for r in rows}
         if req.version and req.version.strip():
             next_ver = req.version.strip().lstrip("v")
@@ -772,7 +846,7 @@ def publish_manual_update(req: PublishUpdateRequest):
         "status": "PUBLISHED",
         "version": next_ver,
         "released_at": now_ms,
-        "released_at_display": datetime.fromtimestamp(now_ms / 1000.0).strftime("%d %b %Y, %I:%M %p")
+        "released_at_display": _fmt_ts(now_ms, "%d %b %Y, %I:%M %p")
     }
 
 
@@ -781,7 +855,6 @@ def _escape_like(term: str) -> str:
 
 
 def _resolve_temporal_window(query_lower: str):
-    from datetime import timedelta
     now_dt = datetime.now()
     day_start = now_dt.replace(hour=0, minute=0, second=0, microsecond=0)
     if any(w in query_lower for w in ("yesterday", "நேற்று", "நேத்து")):
@@ -792,7 +865,10 @@ def _resolve_temporal_window(query_lower: str):
         s = int(day_start.timestamp() * 1000)
         e = int(now_dt.timestamp() * 1000)
         return s, e, "Today"
-    if any(w in query_lower for w in ("last week", "இந்த வாரம்")):
+    if "இந்த வாரம்" in query_lower:
+        week_start = day_start - timedelta(days=now_dt.weekday())
+        return int(week_start.timestamp() * 1000), int(now_dt.timestamp() * 1000), "This week"
+    if "last week" in query_lower:
         s = int((day_start - timedelta(days=7)).timestamp() * 1000)
         e = int(now_dt.timestamp() * 1000)
         return s, e, "Last 7 days"
@@ -872,7 +948,10 @@ def chat_with_luna(req: ChatRequest):
                 "response": "\n".join(lines)
             }
 
-        meaningful = [t for t in tokens if t not in stop_words] or tokens
+        meaningful = [
+            t for t in tokens
+            if t not in stop_words and t not in {"app", "photo", "video", "audio", "screenshot"}
+        ] or [t for t in tokens if t not in stop_words] or tokens
 
         # Fuzzy Levenshtein + Trigram expansion against learned vocabulary & graph nodes
         vocab_rows = c.execute("SELECT token FROM learned_tokens ORDER BY frequency DESC LIMIT 300").fetchall()
@@ -881,6 +960,7 @@ def chat_with_luna(req: ChatRequest):
 
         expanded_terms = list(meaningful)
         fuzzy_matches = []
+        corrected_map = {}
         for t in meaningful:
             if len(t) < 4 or t in vocab_pool:
                 continue
@@ -894,6 +974,7 @@ def chat_with_luna(req: ChatRequest):
                         best_d = d
                         best_lev = v
             if best_lev:
+                corrected_map[t] = best_lev
                 if best_lev not in expanded_terms:
                     expanded_terms.append(best_lev)
                 fuzzy_matches.append(f"{t} → {best_lev}")
@@ -902,10 +983,11 @@ def chat_with_luna(req: ChatRequest):
                 best_sim = 0.42
                 for v in vocab_pool:
                     sim = CognitiveEngine.trigram_similarity(t, v)
-                    if sim >= best_sim:
+                    if sim > best_sim:
                         best_sim = sim
                         best_ng = v
                 if best_ng:
+                    corrected_map[t] = best_ng
                     if best_ng not in expanded_terms:
                         expanded_terms.append(best_ng)
                     fuzzy_matches.append(f"{t} ≈ {best_ng}")
@@ -936,10 +1018,10 @@ def chat_with_luna(req: ChatRequest):
             safe_tok = _escape_like(tok)
             t_rows = c.execute(
                 "SELECT id, source_type, text_content, timestamp FROM memories "
-                "WHERE text_content LIKE ? ESCAPE '\\' ORDER BY timestamp DESC LIMIT 15",
+                "WHERE text_content LIKE ? ESCAPE '\\' ORDER BY timestamp DESC LIMIT 40",
                 (f"%{safe_tok}%",)
             ).fetchall()
-            specificity = min(2.2, max(0.8, 1.0 + math.log(1.0 + 15.0 / max(1, len(t_rows)))))
+            specificity = min(2.2, max(0.8, 1.0 + math.log(1.0 + 10.0 / max(1, len(t_rows))) - 0.15 * (len(t_rows) / 40.0)))
             base_w = (4.0 if tok in meaningful else 2.4) * specificity
             for r in t_rows:
                 add_score(dict(r), base_w)
@@ -957,25 +1039,33 @@ def chat_with_luna(req: ChatRequest):
         else:
             tw_label = None
 
-        matched_nodes = []
+        matched_nodes_map = {}
         for tok in expanded_terms:
             safe_tok = _escape_like(tok)
             for nr in c.execute(
-                "SELECT label, entity_type, mention_count FROM graph_nodes WHERE LOWER(label) LIKE ? ESCAPE '\\' LIMIT 5",
+                "SELECT id, label, entity_type, mention_count FROM graph_nodes "
+                "WHERE LOWER(label) LIKE ? ESCAPE '\\' ORDER BY mention_count DESC LIMIT 5",
                 (f"%{safe_tok}%",)
             ).fetchall():
-                matched_nodes.append(dict(nr))
+                d = dict(nr)
+                if d["id"] not in matched_nodes_map:
+                    matched_nodes_map[d["id"]] = d
+        matched_nodes = sorted(matched_nodes_map.values(), key=lambda x: x["mention_count"], reverse=True)
 
-        anchor = expanded_terms[0] if expanded_terms else None
+        # Prefer fuzzy-resolved or vocab-matched concept when looking up STDP causal transitions
+        prioritized_anchors = [corrected_map.get(t, t) for t in meaningful] + [t for t in expanded_terms if t not in meaningful]
+        anchor = None
         causal_next = []
-        if anchor:
-            causal_next = [
-                dict(tr) for tr in c.execute(
-                    "SELECT to_concept, transition_count, weight FROM learned_transitions "
-                    "WHERE from_concept = ? ORDER BY weight DESC, transition_count DESC LIMIT 3",
-                    (anchor,)
-                ).fetchall()
-            ]
+        for cand in prioritized_anchors:
+            rows_tr = c.execute(
+                "SELECT to_concept, transition_count, weight FROM learned_transitions "
+                "WHERE from_concept = ? ORDER BY weight DESC, transition_count DESC LIMIT 3",
+                (cand,)
+            ).fetchall()
+            if rows_tr:
+                anchor = cand
+                causal_next = [dict(tr) for tr in rows_tr]
+                break
 
     ranked = sorted(scored_memories.values(), key=lambda x: (x["score"], x["row"]["timestamp"]), reverse=True)[:5]
 
@@ -1003,8 +1093,9 @@ def chat_with_luna(req: ChatRequest):
         lines.append(f"Graph Entities: {entities_str}")
     for item in ranked:
         r = item["row"]
-        ts_str = datetime.fromtimestamp(r["timestamp"] / 1000.0).strftime("%d %b %I:%M %p")
-        lines.append(f"• [{r['source_type']} • {ts_str}] {r['text_content']}")
+        ts_str = _fmt_ts(r["timestamp"], "%d %b %I:%M %p")
+        content_txt = (r["text_content"] or "").strip() or "Metadata record"
+        lines.append(f"• [{r['source_type']} • {ts_str}] {content_txt}")
 
     return {
         "query": query,

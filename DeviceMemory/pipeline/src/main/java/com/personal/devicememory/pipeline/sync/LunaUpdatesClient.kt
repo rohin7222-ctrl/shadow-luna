@@ -80,7 +80,7 @@ object LunaUpdatesClient {
 
     suspend fun downloadUpdateBundle(context: Context, version: String): Result<File> =
         withContext(Dispatchers.IO) {
-            val serverUrl = LunaServerConfig.getServerUrl(context)
+            val serverUrl = resolveUrl(context)
             if (!LunaServerConfig.isLocalPrivateUrl(serverUrl)) {
                 return@withContext Result.failure(IllegalStateException("Non-local server blocked"))
             }
@@ -111,7 +111,7 @@ object LunaUpdatesClient {
         }
 
     suspend fun fetchServerMemoryCount(context: Context): Int? = withContext(Dispatchers.IO) {
-        val serverUrl = LunaServerConfig.getServerUrl(context)
+        val serverUrl = resolveUrl(context)
         if (!LunaServerConfig.isLocalPrivateUrl(serverUrl)) return@withContext null
         var conn: HttpURLConnection? = null
         try {
@@ -132,7 +132,7 @@ object LunaUpdatesClient {
     }
 
     suspend fun resetServerBrain(context: Context): Result<Unit> = withContext(Dispatchers.IO) {
-        val serverUrl = LunaServerConfig.getServerUrl(context)
+        val serverUrl = resolveUrl(context)
         if (!LunaServerConfig.isLocalPrivateUrl(serverUrl)) {
             return@withContext Result.failure(IllegalStateException("Non-local server blocked"))
         }

@@ -79,19 +79,20 @@ class CollectionWorker(
                 val recentFloor = (nowMs - 86_400_000L).coerceAtLeast(0L)
                 return maxOf(sinceTimestamp, minOf(records.maxOf { it.timestamp }, recentFloor))
             }
-            val candidate = if (sourceType == SourceType.PHOTO || sourceType == SourceType.VIDEO) {
+            val candidate = if (sourceType == SourceType.PHOTO || sourceType == SourceType.VIDEO || sourceType == SourceType.AUDIO) {
                 records.maxOf { rec ->
                     val added = try {
                         Json.parseToJsonElement(rec.metadataJson).jsonObject["date_added"]?.jsonPrimitive?.longOrNull ?: 0L
                     } catch (_: Throwable) {
                         0L
                     }
-                    maxOf(rec.timestamp, added)
+                    // Guard against future EXIF/DATE_TAKEN pushing media bookmarks ahead of real clock
+                    maxOf(rec.timestamp.coerceAtMost(nowMs), added.coerceAtMost(nowMs))
                 }
             } else {
-                records.maxOf { it.timestamp }
+                records.maxOf { it.timestamp.coerceAtMost(nowMs) }
             }
-            return maxOf(sinceTimestamp, candidate.coerceAtMost(nowMs + 60_000L))
+            return maxOf(sinceTimestamp, candidate.coerceAtMost(nowMs))
         }
 
         internal fun sha256(input: String): String {

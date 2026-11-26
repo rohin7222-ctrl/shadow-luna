@@ -10,6 +10,7 @@ import com.personal.devicememory.app.update.ShadowUpdateState
 import com.personal.devicememory.core.common.model.SourceType
 import com.personal.devicememory.core.database.DeviceMemoryDatabase
 import com.personal.devicememory.core.database.entity.CollectorConfigEntity
+import com.personal.devicememory.pipeline.CollectionWorker
 import com.personal.devicememory.pipeline.WorkScheduler
 import com.personal.devicememory.pipeline.brain.LunaMemorySimulator
 import com.personal.devicememory.pipeline.brain.OnDeviceLunaBrain
@@ -446,14 +447,37 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * Runs collectors strictly offline on device and indexes tokens locally.
      */
     fun collectOfflineNow() {
+        val app = getApplication<Application>()
         try {
-            WorkScheduler.runNow(getApplication())
-            _uiState.update { it.copy(statusMessage = "Collecting & learning offline on phone...") }
+            WorkScheduler.runNow(app)
+            _uiState.update { it.copy(statusMessage = "Collecting & analyzing offline on phone...") }
         } catch (e: Throwable) {
             Log.e(TAG, "Error running WorkScheduler.runNow", e)
+            return
         }
         viewModelScope.launch {
-            delay(2500)
+            val wm = androidx.work.WorkManager.getInstance(app)
+            val deadline = System.currentTimeMillis() + 60_000L
+            while (System.currentTimeMillis() < deadline) {
+                delay(1200)
+                val infos = try {
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                        wm.getWorkInfosForUniqueWork("${CollectionWorker.WORK_NAME}_manual").get()
+                    }
+                } catch (_: Throwable) {
+                    emptyList()
+                }
+                loadState()
+                if (infos.isNotEmpty() && infos.all { it.state.isFinished }) {
+                    val succeeded = infos.any { it.state == androidx.work.WorkInfo.State.SUCCEEDED }
+                    _uiState.update {
+                        it.copy(
+                            statusMessage = if (succeeded) "Learned locally in encrypted vault." else "Collection finished with retries."
+                        )
+                    }
+                    return@launch
+                }
+            }
             loadState()
             _uiState.update { it.copy(statusMessage = "Learned locally in encrypted vault.") }
         }
@@ -491,6 +515,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         topPolicyStrategy = "",
                         jepaAccuracyPct = 0,
                         curiosityTarget = "",
+                        topCausalChain = "",
                         topSimulatedTopics = emptyList(),
                         statusMessage = "Phone vault & offline AI wiped to 0"
                     )

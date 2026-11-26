@@ -45,9 +45,9 @@ object AndroidVideoFrameSampler {
                 if (mime.startsWith("video/")) {
                     codec = simplifyVideoCodec(mime)
                     if (fmt.containsKey(MediaFormat.KEY_FRAME_RATE)) {
-                        estimatedFps = fmt.getInteger(MediaFormat.KEY_FRAME_RATE).toDouble()
+                        estimatedFps = readNumberAsDouble(fmt, MediaFormat.KEY_FRAME_RATE)
                     } else if (fmt.containsKey(MediaFormat.KEY_CAPTURE_RATE)) {
-                        estimatedFps = fmt.getFloat(MediaFormat.KEY_CAPTURE_RATE).toDouble()
+                        estimatedFps = readNumberAsDouble(fmt, MediaFormat.KEY_CAPTURE_RATE)
                     }
                 } else if (mime.startsWith("audio/")) {
                     hasAudioTrack = true
@@ -83,9 +83,9 @@ object AndroidVideoFrameSampler {
                 if (System.currentTimeMillis() - startedMs > FRAME_BUDGET_MS) break
                 val bmp = retrieveCompactBitmap(retriever, tsMs * 1000L) ?: continue
                 try {
-                    samples.add(bitmapToFrameSample(tsMs, bmp))
+                    bitmapToFrameSample(tsMs, bmp)?.let { samples.add(it) }
                 } finally {
-                    bmp.recycle()
+                    if (!bmp.isRecycled) bmp.recycle()
                 }
             }
         } catch (e: Exception) {
@@ -124,55 +124,87 @@ object AndroidVideoFrameSampler {
             } else {
                 val full = retriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
                     ?: return null
-                val scaled = Bitmap.createScaledBitmap(full, 32, 32, true)
-                if (scaled != full) full.recycle()
-                scaled
+                var scaled: Bitmap? = null
+                try {
+                    scaled = Bitmap.createScaledBitmap(full, 32, 32, true)
+                    scaled
+                } finally {
+                    if (scaled !== full && !full.isRecycled) full.recycle()
+                }
             }
-        } catch (_: Exception) {
+        } catch (_: Throwable) {
             null
         }
     }
 
-    private fun bitmapToFrameSample(timestampMs: Long, bmp: Bitmap): FrameSample {
-        val w = bmp.width.coerceAtLeast(4)
-        val h = bmp.height.coerceAtLeast(4)
-        val pixels = IntArray(w * h)
-        bmp.getPixels(pixels, 0, w, 0, 0, w, h)
-
-        val patchSums = FloatArray(16)
-        val patchCounts = IntArray(16)
-        var sumR = 0.0
-        var sumG = 0.0
-        var sumB = 0.0
-
-        for (y in 0 until h) {
-            val gy = min(3, (y * 4) / h)
-            for (x in 0 until w) {
-                val gx = min(3, (x * 4) / w)
-                val pIdx = gy * 4 + gx
-                val c = pixels[y * w + x]
-                val r = Color.red(c) / 255.0
-                val g = Color.green(c) / 255.0
-                val b = Color.blue(c) / 255.0
-                sumR += r
-                sumG += g
-                sumB += b
-                patchSums[pIdx] += (0.299 * r + 0.587 * g + 0.114 * b).toFloat()
-                patchCounts[pIdx]++
+    private fun readNumberAsDouble(fmt: MediaFormat, key: String): Double? {
+        return try {
+            fmt.getFloat(key).toDouble()
+        } catch (_: Throwable) {
+            try {
+                fmt.getInteger(key).toDouble()
+            } catch (_: Throwable) {
+                null
             }
         }
+    }
 
-        val patch = FloatArray(16) { idx ->
-            if (patchCounts[idx] > 0) patchSums[idx] / patchCounts[idx] else 0f
+    private fun bitmapToFrameSample(timestampMs: Long, bmp: Bitmap): FrameSample? {
+        val rawW = bmp.width
+        val rawH = bmp.height
+        if (rawW <= 0 || rawH <= 0) return null
+
+        val readableBmp = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && bmp.config == Bitmap.Config.HARDWARE) {
+            bmp.copy(Bitmap.Config.ARGB_8888, false) ?: return null
+        } else {
+            bmp
         }
-        val n = pixels.size.toDouble().coerceAtLeast(1.0)
-        return FrameSample(
-            timestampMs = timestampMs,
-            patch4x4Luma = patch,
-            avgR = sumR / n,
-            avgG = sumG / n,
-            avgB = sumB / n
-        )
+
+        return try {
+            val w = readableBmp.width
+            val h = readableBmp.height
+            val pixels = IntArray(w * h)
+            readableBmp.getPixels(pixels, 0, w, 0, 0, w, h)
+
+            val patchSums = FloatArray(16)
+            val patchCounts = IntArray(16)
+            var sumR = 0.0
+            var sumG = 0.0
+            var sumB = 0.0
+
+            for (y in 0 until h) {
+                val gy = min(3, (y * 4) / h)
+                for (x in 0 until w) {
+                    val gx = min(3, (x * 4) / w)
+                    val pIdx = gy * 4 + gx
+                    val c = pixels[y * w + x]
+                    val r = Color.red(c) / 255.0
+                    val g = Color.green(c) / 255.0
+                    val b = Color.blue(c) / 255.0
+                    sumR += r
+                    sumG += g
+                    sumB += b
+                    patchSums[pIdx] += (0.299 * r + 0.587 * g + 0.114 * b).toFloat()
+                    patchCounts[pIdx]++
+                }
+            }
+
+            val patch = FloatArray(16) { idx ->
+                if (patchCounts[idx] > 0) patchSums[idx] / patchCounts[idx] else 0f
+            }
+            val n = pixels.size.toDouble().coerceAtLeast(1.0)
+            FrameSample(
+                timestampMs = timestampMs,
+                patch4x4Luma = patch,
+                avgR = sumR / n,
+                avgG = sumG / n,
+                avgB = sumB / n
+            )
+        } finally {
+            if (readableBmp !== bmp && !readableBmp.isRecycled) {
+                readableBmp.recycle()
+            }
+        }
     }
 
     private fun simplifyVideoCodec(mime: String): String {

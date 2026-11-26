@@ -16,7 +16,10 @@ import com.personal.devicememory.core.database.entity.SyncBookmarkEntity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.util.UUID
 
 /**
@@ -57,6 +60,7 @@ class MemoryNotificationListener : NotificationListenerService() {
     }
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val persistMutex = Mutex()
 
     override fun onListenerConnected() {
         super.onListenerConnected()
@@ -70,6 +74,13 @@ class MemoryNotificationListener : NotificationListenerService() {
         isConnected = false
         instance = null
         Log.i(TAG, "Notification listener disconnected")
+    }
+
+    override fun onDestroy() {
+        isConnected = false
+        instance = null
+        serviceScope.cancel()
+        super.onDestroy()
     }
 
     override fun onNotificationPosted(sbn: StatusBarNotification?) {
@@ -115,39 +126,46 @@ class MemoryNotificationListener : NotificationListenerService() {
                     createdAt = now
                 )
 
-                val insertedRowIds = db.collectedRecordDao().insertAll(listOf(entity))
-                val insertedRowId = insertedRowIds.firstOrNull() ?: -1L
-                if (insertedRowId < 0L) {
-                    return@launch
-                }
+                persistMutex.withLock {
+                    val insertedRowIds = db.collectedRecordDao().insertAll(listOf(entity))
+                    val insertedRowId = insertedRowIds.firstOrNull() ?: -1L
+                    if (insertedRowId < 0L) {
+                        return@withLock
+                    }
 
-                // Index redacted notification tokens locally offline for OnDeviceLunaBrain
-                val notifTokens = Regex("""[\p{L}\p{M}\p{N}_]{2,40}""")
-                    .findAll((sanitizedText ?: "").lowercase())
-                    .map { it.value }
-                    .filter { tok -> tok.any { it.isLetterOrDigit() } }
-                    .distinct()
-                    .take(25)
-                for (tok in notifTokens) {
-                    db.learnedTokenDao().recordToken(tok, SourceType.NOTIFICATION.name, record.timestamp)
-                }
+                    // Index redacted notification tokens locally offline for OnDeviceLunaBrain
+                    val notifTokens = Regex("""[\p{L}\p{M}\p{N}_]{2,40}""")
+                        .findAll((sanitizedText ?: "").lowercase())
+                        .map { it.value }
+                        .filter { tok -> tok.any { it.isLetterOrDigit() } }
+                        .distinct()
+                        .take(25)
+                    for (tok in notifTokens) {
+                        db.learnedTokenDao().recordToken(tok, SourceType.NOTIFICATION.name, record.timestamp)
+                    }
 
-                // Update bookmark
-                db.syncBookmarkDao().upsert(
-                    SyncBookmarkEntity(
-                        sourceType = SourceType.NOTIFICATION.name,
-                        lastTimestamp = record.timestamp,
-                        lastItemHash = parsed.contentHash,
-                        updatedAt = now
+                    // Advance bookmark monotonically and clamp to prevent future postTime lockout
+                    val existingBookmark = db.syncBookmarkDao().getBookmark(SourceType.NOTIFICATION.name)
+                    val safeTs = maxOf(
+                        existingBookmark?.lastTimestamp ?: 0L,
+                        record.timestamp.coerceAtMost(now + 5_000L)
                     )
-                )
+                    db.syncBookmarkDao().upsert(
+                        SyncBookmarkEntity(
+                            sourceType = SourceType.NOTIFICATION.name,
+                            lastTimestamp = safeTs,
+                            lastItemHash = parsed.contentHash,
+                            updatedAt = now
+                        )
+                    )
 
-                // Update last run status
-                db.collectorConfigDao().updateRunStatus(
-                    sourceType = SourceType.NOTIFICATION.name,
-                    runAt = now,
-                    status = "SUCCESS"
-                )
+                    // Update last run status
+                    db.collectorConfigDao().updateRunStatus(
+                        sourceType = SourceType.NOTIFICATION.name,
+                        runAt = now,
+                        status = "SUCCESS"
+                    )
+                }
 
                 Log.d(TAG, "Stored notification from: ${parsed.packageName}")
             } catch (e: Exception) {
